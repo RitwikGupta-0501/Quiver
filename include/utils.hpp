@@ -2,6 +2,7 @@
 #define ERR -1
 #include <string>
 #include <string_view>
+#include <vector>
 #include <filesystem>
 #include <cstdint>
 #include <sys/types.h>
@@ -9,6 +10,11 @@
 namespace fs = std::filesystem;
 
 namespace Utils {
+    struct GpuRequest {
+        bool all_gpus{false};
+        std::vector<int> gpu_indices{};
+    };
+
     enum class ArchiveCompression {
         Auto,
         Uncompressed, // application/vnd.oci.image.layer.v1.tar
@@ -44,4 +50,5 @@ namespace Utils {
     auto parse_memory_string(std::string_view str) -> std::size_t;
     auto parse_cpus_string(std::string_view str) -> double;
     auto parse_pids_limit(std::string_view str) -> int;
+    auto parse_gpus_string(std::string_view str) -> GpuRequest;
 }

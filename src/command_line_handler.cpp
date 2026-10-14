@@ -121,6 +121,20 @@ void CommandLineHandler::run(const std::vector<std::string>& cmds) {
                 std::cerr << "Error: --pids-limit requires an argument\n";
                 return;
             }
+        } else if (arg == "--gpus") {
+            if (i + 1 < cmds.size()) {
+                try {
+                    auto req = Utils::parse_gpus_string(cmds[++i]);
+                    spec.resources.all_gpus = req.all_gpus;
+                    spec.resources.gpu_indices = std::move(req.gpu_indices);
+                } catch (const std::exception& e) {
+                    std::cerr << "Error: Invalid --gpus value: " << e.what() << '\n';
+                    return;
+                }
+            } else {
+                std::cerr << "Error: --gpus requires an argument (e.g., all or 0,1)\n";
+                return;
+            }
         } else if (arg == "-i" || arg == "--image") {
             if (i + 1 < cmds.size()) {
                 spec.image = cmds[++i];
@@ -480,8 +494,236 @@ void CommandLineHandler::create(const std::vector<std::string>& cmds) {
             cs.volumes.push_back(vm);
         }
         m_store.save_container(cs);
+    } else if (cmds[0] == "gpu") {
+        if (cmds.size() < 3) {
+            std::cerr << "Usage: quiver create gpu <container_id> <all|0,1,...>\n";
+            return;
+        }
+        std::string cid = cmds[1];
+        auto opt = m_store.get_container(cid);
+        if (!opt) {
+            Utils::handle_error("Container " + cid + " doesn't exist");
+            return;
+        }
+        ContainerState cs = *opt;
+        try {
+            auto req = Utils::parse_gpus_string(cmds[2]);
+            cs.resources.all_gpus = req.all_gpus;
+            cs.resources.gpu_indices = std::move(req.gpu_indices);
+        } catch (const std::exception& e) {
+            std::cerr << "Error: Invalid --gpus value: " << e.what() << '\n';
+            return;
+        }
+        if (m_store.save_container(cs)) {
+            std::cout << "Configured GPU access for container " << cid << '\n';
+        } else {
+            std::cerr << "Error: Failed to update container state for " << cid << '\n';
+        }
     } else {
-        Utils::print_usage();
+        ContainerSpec spec{};
+        spec.id = Utils::generate_container_id();
+
+        size_t i = 0;
+        while (i < cmds.size()) {
+            std::string arg = cmds[i];
+            if (arg == "-n" || arg == "--name") {
+                if (i + 1 < cmds.size()) {
+                    spec.name = cmds[++i];
+                } else {
+                    std::cerr << "Error: -n or --name requires an argument\n";
+                    return;
+                }
+            } else if (arg == "-v" || arg == "--volume") {
+                if (i + 1 < cmds.size()) {
+                    std::string vol_str = cmds[++i];
+                    size_t sep_pos = vol_str.find(':');
+                    if (sep_pos != std::string::npos) {
+                        VolumeMount vm{};
+                        vm.host_path = vol_str.substr(0, sep_pos);
+                        vm.container_path = vol_str.substr(sep_pos + 1);
+                        spec.volumes.push_back(vm);
+                    } else {
+                        std::cerr << "Error: Invalid volume format: " << vol_str << " (expected host:container)\n";
+                        return;
+                    }
+                } else {
+                    std::cerr << "Error: -v or --volume requires an argument\n";
+                    return;
+                }
+            } else if (arg == "-p" || arg == "--port") {
+                if (i + 1 < cmds.size()) {
+                    std::string port_str = cmds[++i];
+                    size_t sep_pos = port_str.find(':');
+                    if (sep_pos != std::string::npos) {
+                        try {
+                            PortMapping pm{};
+                            pm.host_port = std::stoi(port_str.substr(0, sep_pos));
+                            pm.container_port = std::stoi(port_str.substr(sep_pos + 1));
+                            pm.protocol = "tcp";
+                            spec.ports.push_back(pm);
+                        } catch (...) {
+                            std::cerr << "Error: Invalid port numbers: " << port_str << '\n';
+                            return;
+                        }
+                    } else {
+                        std::cerr << "Error: Invalid port format: " << port_str << " (expected host:container)\n";
+                        return;
+                    }
+                } else {
+                    std::cerr << "Error: -p or --port requires an argument\n";
+                    return;
+                }
+            } else if (arg == "--vfs") {
+                spec.use_vfs = true;
+            } else if (arg == "--no-remove") {
+                spec.no_remove = true;
+            } else if (arg == "-m" || arg == "--memory") {
+                if (i + 1 < cmds.size()) {
+                    try {
+                        spec.resources.memory_max_bytes = Utils::parse_memory_string(cmds[++i]);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error: Invalid --memory value: " << e.what() << '\n';
+                        return;
+                    }
+                } else {
+                    std::cerr << "Error: " << arg << " requires an argument\n";
+                    return;
+                }
+            } else if (arg == "--cpus") {
+                if (i + 1 < cmds.size()) {
+                    try {
+                        spec.resources.cpus = Utils::parse_cpus_string(cmds[++i]);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error: Invalid --cpus value: " << e.what() << '\n';
+                        return;
+                    }
+                } else {
+                    std::cerr << "Error: --cpus requires an argument\n";
+                    return;
+                }
+            } else if (arg == "--pids-limit") {
+                if (i + 1 < cmds.size()) {
+                    try {
+                        spec.resources.pids_max = Utils::parse_pids_limit(cmds[++i]);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error: Invalid --pids-limit value: " << e.what() << '\n';
+                        return;
+                    }
+                } else {
+                    std::cerr << "Error: --pids-limit requires an argument\n";
+                    return;
+                }
+            } else if (arg == "--gpus") {
+                if (i + 1 < cmds.size()) {
+                    try {
+                        auto req = Utils::parse_gpus_string(cmds[++i]);
+                        spec.resources.all_gpus = req.all_gpus;
+                        spec.resources.gpu_indices = std::move(req.gpu_indices);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error: Invalid --gpus value: " << e.what() << '\n';
+                        return;
+                    }
+                } else {
+                    std::cerr << "Error: --gpus requires an argument (e.g., all or 0,1)\n";
+                    return;
+                }
+            } else if (arg == "-i" || arg == "--image") {
+                if (i + 1 < cmds.size()) {
+                    spec.image = cmds[++i];
+                } else {
+                    std::cerr << "Error: -i or --image requires an argument\n";
+                    return;
+                }
+            } else if (arg == "--") {
+                for (size_t j = i + 1; j < cmds.size(); ++j) {
+                    spec.command.push_back(cmds[j]);
+                }
+                break;
+            } else if (!arg.starts_with('-')) {
+                for (size_t j = i; j < cmds.size(); ++j) {
+                    spec.command.push_back(cmds[j]);
+                }
+                break;
+            } else {
+                std::cerr << "Unknown argument: " << arg << "\n";
+                Utils::print_usage();
+                return;
+            }
+            i++;
+        }
+
+        if (spec.image.empty()) {
+            std::cerr << "Error: Image name required (-i)\n";
+            return;
+        }
+
+        std::string out_path;
+        std::string error;
+        if (!m_img_manager.pull(spec.image, out_path, error)) {
+            std::cerr << "Error pulling image: " << error << '\n';
+            return;
+        }
+
+        std::string img_name, img_tag;
+        size_t colon_pos = spec.image.find(':');
+        if (colon_pos != std::string::npos) {
+            img_name = spec.image.substr(0, colon_pos);
+            img_tag = spec.image.substr(colon_pos + 1);
+        } else {
+            img_name = spec.image;
+            img_tag = "latest";
+        }
+
+        auto img_meta = m_store.get_image(img_name, img_tag);
+        if (img_meta.has_value()) {
+            spec.rootfs_path = img_meta->rootfs_path;
+            spec.env = img_meta->default_env;
+            if (!img_meta->working_dir.empty()) {
+                spec.working_dir = img_meta->working_dir;
+            }
+            if (spec.command.empty()) {
+                if (!img_meta->default_entrypoint.empty() || !img_meta->default_cmd.empty()) {
+                    for (const auto& ep : img_meta->default_entrypoint) {
+                        spec.command.push_back(ep);
+                    }
+                    for (const auto& c : img_meta->default_cmd) {
+                        spec.command.push_back(c);
+                    }
+                }
+            }
+        } else {
+            spec.rootfs_path = out_path;
+        }
+
+        if (spec.hostname.empty()) {
+            spec.hostname = spec.id.substr(0, 6);
+        }
+        if (spec.name.empty()) {
+            spec.name = "quiver-" + spec.id.substr(0, 12);
+        }
+
+        ContainerState cs{};
+        cs.id = spec.id;
+        cs.name = spec.name;
+        cs.image = spec.image;
+        cs.pid = -1;
+        cs.net_pid = -1;
+        cs.status = "created";
+        cs.hostname = spec.hostname;
+        cs.rootfs_path = spec.rootfs_path;
+        cs.bundle_path = m_store.container_bundle_dir(spec.id).string();
+        cs.command = spec.command.empty() ? std::vector<std::string>{"/bin/sh"} : spec.command;
+        cs.use_vfs = spec.use_vfs;
+        cs.no_remove = spec.no_remove;
+        cs.volumes = spec.volumes;
+        cs.ports = spec.ports;
+        cs.resources = spec.resources;
+
+        if (m_store.save_container(cs)) {
+            std::cout << cs.id << '\n';
+        } else {
+            std::cerr << "Error: Failed to save created container state\n";
+        }
     }
 }
 
@@ -596,3 +838,9 @@ void CommandLineHandler::vfs(const std::vector<std::string>& cmds) {
         Utils::print_usage();
     }
 }
+
+void CommandLineHandler::stats(const std::vector<std::string>& cmds) {
+    (void)cmds;
+    std::cout << "CONTAINER ID   NAME             CPU %     MEM USAGE / LIMIT     PIDS        GPU UTIL   GPU VRAM\n";
+}
+

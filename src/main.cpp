@@ -37,6 +37,7 @@ int main(int argc, char* argv[]) {
         commands["create"]  = [&handler](const std::vector<std::string>& args) { handler.create(args); };
         commands["pull"]    = [&handler](const std::vector<std::string>& args) { handler.pull(args); };
         commands["vfs"]     = [&handler](const std::vector<std::string>& args) { handler.vfs(args); };
+        commands["stats"]   = [&handler](const std::vector<std::string>& args) { handler.stats(args); };
         commands["help"]    = [](const std::vector<std::string>&) { Utils::print_usage(); };
 
         std::vector<std::string> cmds;
