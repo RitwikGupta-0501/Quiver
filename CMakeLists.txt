@@ -171,6 +171,29 @@ add_executable(cuda_matrix_bench
 )
 target_link_libraries(cuda_matrix_bench PRIVATE dl Threads::Threads)
 
+# Phase 5.3: End-to-End GPU Workload & Unified Isolation Proof
+add_executable(quiver_e2e_gpu_tests
+    tests/test_e2e_gpu_workload.cpp
+    src/gpu_manager.cpp
+    src/cgroup.cpp
+    src/state_store.cpp
+    src/mount.cpp
+    src/device_manager.cpp
+    src/utils.cpp
+    src/monitor.cpp
+)
+target_include_directories(quiver_e2e_gpu_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(quiver_e2e_gpu_tests PRIVATE
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+    dl
+)
+add_dependencies(quiver_e2e_gpu_tests cuda_matrix_bench)
+add_test(NAME E2EGpuWorkloadTests COMMAND quiver_e2e_gpu_tests)
+
+
 
 
 
