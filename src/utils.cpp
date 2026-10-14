@@ -198,6 +198,7 @@ std::string Utils::generate_container_id() {
 }
 
 int Utils::remove_directory_recursively(const std::string& path) {
+    ::chmod(path.c_str(), 0755);
     DIR* dir{ opendir(path.c_str()) };
     if (!dir) {
         return ERR;
@@ -213,9 +214,9 @@ int Utils::remove_directory_recursively(const std::string& path) {
             continue;
         }
         if (S_ISDIR(statbuf.st_mode)) {
-            if (remove_directory_recursively(full_path) == ERR) {
-            }
+            remove_directory_recursively(full_path);
         } else {
+            ::chmod(full_path.c_str(), 0644);
             unlink(full_path.c_str());
         }
     }

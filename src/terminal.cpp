@@ -1,7 +1,5 @@
 #include "../include/terminal.hpp"
 #include "../include/utils.hpp"
-#include "../include/network.hpp"
-#include "../include/container.hpp"
 #include <cstdlib>
 #include <pty.h>
 #include <termios.h>
@@ -13,54 +11,87 @@
 #include <sys/stat.h>
 #include <cstring>
 #include <fcntl.h>
+#include <filesystem>
+#include <iostream>
 
-int Terminal::m_sfd{-1};
-std::string Terminal::m_container_id{""};
-termios Terminal::m_orig_term{};
-pid_t Terminal::m_container_pid{-1};
-volatile bool Terminal::m_running{ false };
+Terminal::Terminal(Terminal&& other) noexcept
+    : m_sfd(other.m_sfd),
+      m_master_fd(other.m_master_fd),
+      m_container_id(std::move(other.m_container_id)),
+      m_sock_path(std::move(other.m_sock_path)),
+      m_container_pid(other.m_container_pid),
+      m_running(other.m_running) {
+    other.m_sfd = -1;
+    other.m_master_fd = -1;
+    other.m_container_pid = -1;
+    other.m_running = false;
+}
 
-void Terminal::start_pty_session(PtyArgs& args){
-    if(openpty(&args.master_fd, &args.slave_fd, args.slave_name, nullptr, &args.window_size) == ERR)
+Terminal& Terminal::operator=(Terminal&& other) noexcept {
+    if (this != &other) {
+        cleanup();
+        m_sfd = other.m_sfd;
+        m_master_fd = other.m_master_fd;
+        m_container_id = std::move(other.m_container_id);
+        m_sock_path = std::move(other.m_sock_path);
+        m_container_pid = other.m_container_pid;
+        m_running = other.m_running;
+
+        other.m_sfd = -1;
+        other.m_master_fd = -1;
+        other.m_container_pid = -1;
+        other.m_running = false;
+    }
+    return *this;
+}
+
+void Terminal::start_pty_session(PtyArgs& args) {
+    if (openpty(&args.master_fd, &args.slave_fd, args.slave_name, nullptr, &args.window_size) == ERR)
         Utils::handle_error("Unable to open a new pty session");
 }
 
-void Terminal::redirect_io(const int &slave_fd){
-    if(ioctl(slave_fd, TIOCSCTTY, 0) == ERR)
+void Terminal::redirect_io(int slave_fd) {
+    if (ioctl(slave_fd, TIOCSCTTY, 0) == ERR)
         Utils::handle_error("ioctl TCIOCSCTTY");
-    if(dup2(slave_fd, STDIN_FILENO) == ERR)
+    if (dup2(slave_fd, STDIN_FILENO) == ERR)
         Utils::handle_error("Redirect stdin to slave file descriptor");
-    if(dup2(slave_fd, STDOUT_FILENO) == ERR)
+    if (dup2(slave_fd, STDOUT_FILENO) == ERR)
         Utils::handle_error("Redirect stdout to slave file descriptor");
-    if(dup2(slave_fd, STDERR_FILENO) == ERR)
+    if (dup2(slave_fd, STDERR_FILENO) == ERR)
         Utils::handle_error("Redirect stderr to slave file descriptor");
 }
 
-int Terminal::get_sfd() const {
-    return m_sfd;
-}
-void Terminal::start_server(const PtyArgs& args, const std::string& container_id, const pid_t& container_pid){
+void Terminal::start_server(const PtyArgs& args, const std::string& container_id, pid_t container_pid) {
     m_container_id = container_id;
-    std::string sock_path{ Utils::get_sock_path(container_pid) };
+    m_container_pid = container_pid;
+    m_master_fd = args.master_fd;
+    m_sock_path = Utils::get_sock_path(container_pid);
 
-    unlink(sock_path.c_str());
+    unlink(m_sock_path.c_str());
 
-    int sfd{ socket(AF_UNIX, SOCK_STREAM, 0) };
+    int sfd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sfd == ERR) Utils::handle_error("TTY Proxy Socket Creation failed");
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, sock_path.c_str(), sizeof(addr.sun_path) - 1);
+    strncpy(addr.sun_path, m_sock_path.c_str(), sizeof(addr.sun_path) - 1);
 
     if (bind(sfd, (sockaddr*)&addr, sizeof(addr)) == ERR) {
         close(sfd);
         Utils::handle_error("TTY Proxy Socket binding failed");
     }
 
-    chmod(sock_path.c_str(), S_IRUSR | S_IWUSR);
+    chmod(m_sock_path.c_str(), S_IRUSR | S_IWUSR);
+
+    if (!container_id.empty()) {
+        std::string id_sock = Utils::get_sock_path(container_id);
+        unlink(id_sock.c_str());
+        std::error_code ec;
+        fs::create_symlink(m_sock_path, id_sock, ec);
+    }
 
     if (listen(sfd, 1) == ERR) {
         close(sfd);
-        unlink(sock_path.c_str());
+        unlink(m_sock_path.c_str());
         Utils::handle_error("TTY Proxy listen failed");
     }
 
@@ -68,16 +99,15 @@ void Terminal::start_server(const PtyArgs& args, const std::string& container_id
     m_sfd = sfd;
 
     while (true) {
-        int status{};
-        pid_t r{ waitpid(container_pid, &status, WNOHANG) };
-        if (r == container_pid) {
+        siginfo_t info{};
+        if (waitid(P_PID, container_pid, &info, WEXITED | WNOHANG | WNOWAIT) == 0 && info.si_pid == container_pid) {
             break;
         }
 
         pollfd pf{};
         pf.fd = sfd;
         pf.events = POLLIN;
-        int rv{ poll(&pf, 1, 500) };
+        int rv = poll(&pf, 1, 500);
 
         if (rv < 0) {
             if (errno == EINTR) continue;
@@ -87,16 +117,16 @@ void Terminal::start_server(const PtyArgs& args, const std::string& container_id
             continue;
         }
 
-        int cfd{ accept(sfd, NULL, NULL) };
+        int cfd = accept(sfd, NULL, NULL);
         if (cfd == ERR) {
             if (errno == EINTR) continue;
             break;
         }
 
-        bool client_connected { true };
+        bool client_connected = true;
         while (client_connected) {
-            pid_t rr{ waitpid(container_pid, &status, WNOHANG) };
-            if (rr == container_pid) {
+            siginfo_t info_c{};
+            if (waitid(P_PID, container_pid, &info_c, WEXITED | WNOHANG | WNOWAIT) == 0 && info_c.si_pid == container_pid) {
                 client_connected = false;
                 m_running = false;
                 break;
@@ -108,7 +138,7 @@ void Terminal::start_server(const PtyArgs& args, const std::string& container_id
             pf2[1].fd = cfd;
             pf2[1].events = POLLIN;
 
-            int r2{ poll(pf2, 2, 500) };
+            int r2 = poll(pf2, 2, 500);
             if (r2 < 0) {
                 if (errno == EINTR) continue;
                 client_connected = false;
@@ -126,7 +156,7 @@ void Terminal::start_server(const PtyArgs& args, const std::string& container_id
 
             if (pf2[0].revents & POLLIN) {
                 char buf[4096]{};
-                ssize_t n{ read(args.master_fd, buf, sizeof(buf)) };
+                ssize_t n = read(args.master_fd, buf, sizeof(buf));
                 if (n <= 0) {
                     m_running = false;
                     client_connected = false;
@@ -137,7 +167,7 @@ void Terminal::start_server(const PtyArgs& args, const std::string& container_id
 
             if (pf2[1].revents & POLLIN) {
                 char buf[4096]{};
-                ssize_t n{ read(cfd, buf, sizeof(buf)) };
+                ssize_t n = read(cfd, buf, sizeof(buf));
                 if (n <= 0) {
                     client_connected = false;
                 } else if (write(args.master_fd, buf, n) <= 0) {
@@ -152,12 +182,12 @@ void Terminal::start_server(const PtyArgs& args, const std::string& container_id
             break;
         }
     }
-    cleanup(sfd, args.master_fd);
+    cleanup();
 }
 
-void Terminal::connect_to_server(const int& container_pid){
-    std::string sock_path{ Utils::get_sock_path(container_pid) };
-    int sfd{ socket(AF_UNIX, SOCK_STREAM, 0) };
+void Terminal::connect_to_server(pid_t container_pid) {
+    std::string sock_path = Utils::get_sock_path(container_pid);
+    int sfd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sfd == ERR) return Utils::handle_error("Attach Socket failed");
 
     sockaddr_un addr{};
@@ -175,13 +205,13 @@ void Terminal::connect_to_server(const int& container_pid){
         return Utils::handle_error("Attach tcgetattr failed");
     }
 
-    termios newt { oldt };
+    termios newt = oldt;
     cfmakeraw(&newt);
     tcsetattr(STDIN_FILENO, TCSANOW, &newt);
 
-    bool saw_ctrlp { false };
-    bool should_run { true };
-    bool user_detached { false };
+    bool saw_ctrlp = false;
+    bool should_run = true;
+    bool user_detached = false;
 
     while (should_run) {
         pollfd fds[2]{};
@@ -217,7 +247,7 @@ void Terminal::connect_to_server(const int& container_pid){
                         user_detached = true;
                         break;
                     }
-                    unsigned char seq[2] { 0x10, c };
+                    unsigned char seq[2]{ 0x10, c };
                     if (write(sfd, seq, 2) <= 0) {
                         should_run = false;
                         break;
@@ -238,7 +268,7 @@ void Terminal::connect_to_server(const int& container_pid){
 
         if (fds[1].revents & POLLIN) {
             char buf[4096];
-            ssize_t n { read(sfd, buf, sizeof(buf)) };
+            ssize_t n = read(sfd, buf, sizeof(buf));
             if (n <= 0) {
                 should_run = false;
                 break;
@@ -255,16 +285,31 @@ void Terminal::connect_to_server(const int& container_pid){
 
     if (user_detached) {
         fprintf(stderr, "\r\n[detached from container]\r\n");
-    }
-    else {
+    } else {
         fprintf(stderr, "\r\n[session terminated by server]\r\n");
     }
 }
 
-void Terminal::cleanup(int sfd, int master_fd){
-    if (sfd >= 0) close(sfd);
-    if (master_fd >= 0) close(master_fd);
+void Terminal::cleanup() {
+    if (m_sfd >= 0) {
+        ::close(m_sfd);
+        m_sfd = -1;
+    }
+    if (m_master_fd >= 0) {
+        ::close(m_master_fd);
+        m_master_fd = -1;
+    }
+    if (!m_sock_path.empty()) {
+        ::unlink(m_sock_path.c_str());
+        m_sock_path.clear();
+    }
+    if (!m_container_id.empty()) {
+        std::string id_sock = Utils::get_sock_path(m_container_id);
+        ::unlink(id_sock.c_str());
+    }
     m_running = false;
 }
-Terminal::~Terminal(){
+
+Terminal::~Terminal() {
+    cleanup();
 }

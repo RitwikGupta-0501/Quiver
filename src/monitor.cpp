@@ -15,6 +15,7 @@
 #include "monitor.hpp"
 
 Monitor::Monitor() {
+    m_owner_pid = ::getpid();
     m_running.store(true);
     m_worker = std::thread([this]() -> void {
         while (true) {
@@ -49,6 +50,12 @@ Monitor::Monitor() {
 }
 
 Monitor::~Monitor() {
+    if (m_owner_pid != ::getpid()) {
+        if (m_worker.joinable()) {
+            m_worker.detach();
+        }
+        return;
+    }
     m_running.store(false);
     m_cv.notify_all();
     if (m_worker.joinable()) {

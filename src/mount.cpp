@@ -1,5 +1,7 @@
 #include "../include/mount.hpp"
 #include "../include/utils.hpp"
+#include <format>
+#include <cstring>
 
 void Mount::proc(const std::string& proc_path, const int& flags, const std::string& options){
     if(mount(PROC, proc_path.c_str(), PROC, flags, options.empty() ? nullptr : options.c_str()) == ERR)
@@ -54,5 +56,20 @@ void Mount::volumes(const std::string& rootfs, const std::vector<VolumeMount>& v
                 Utils::handle_error("Unable to mount " + paths[i] + " to " + dirs[i]);
             }
         }
+    }
+}
+
+void Mount::overlay(
+    const fs::path& lower_dir,
+    const fs::path& upper_dir,
+    const fs::path& work_dir,
+    const fs::path& merged_dir
+) {
+    std::string opts = std::format(
+        "lowerdir={},upperdir={},workdir={},userxattr",
+        lower_dir.string(), upper_dir.string(), work_dir.string()
+    );
+    if (::mount("overlay", merged_dir.c_str(), "overlay", MS_NODEV, opts.c_str()) == ERR) {
+        Utils::handle_error("Cannot mount rootless overlayfs (" + opts + "): " + std::strerror(errno));
     }
 }

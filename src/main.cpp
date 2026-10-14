@@ -9,7 +9,7 @@
 #include <map>
 #include <vector>
 
-using CommandHandler = std::function<void(StateStore&, ImageManager&, const std::vector<std::string>&)>;
+using CommandHandler = std::function<void(const std::vector<std::string>&)>;
 
 int main(int argc, char* argv[]) {
     try {
@@ -17,6 +17,7 @@ int main(int argc, char* argv[]) {
         StateStore store{ base_dir };
 
         ImageManager img_manager(store);
+        CommandLineHandler handler(store, img_manager);
 
         if (argc < 2) {
             Utils::print_usage();
@@ -24,57 +25,31 @@ int main(int argc, char* argv[]) {
         }
 
         std::map<std::string, CommandHandler> commands{};
-        commands["run"]    = [](StateStore& store[[maybe_unused]],
-                                ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::run(store, args); };
-        commands["attach"] = [](StateStore& store[[maybe_unused]],
-                                ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::attach(store, args); };
-        commands["ps"]     = [](StateStore& store[[maybe_unused]],
-                                ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::ps(store, args); };
-        commands["rm"]     = [](StateStore& store[[maybe_unused]],
-                                ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::rm(store, args); };
-        commands["start"]  = [](StateStore& store[[maybe_unused]],
-                                ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::start(store, args); };
-        commands["stop"]   = [](StateStore& store[[maybe_unused]],
-                                ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::stop(store, args); };
-        commands["image"]  = [](StateStore& store[[maybe_unused]],
-                                ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::image(store, img, args); };
-        commands["volume"] = [](StateStore& store[[maybe_unused]],
-                                ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::volume(store, args); };
-        commands["network"] = [](StateStore& store[[maybe_unused]],
-                                ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::network(store, args); };
-        commands["create"] = [](StateStore& store[[maybe_unused]],
-                                ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::create(store, args); };
-        commands["pull"]   = [](StateStore& store[[maybe_unused]],
-                                ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::pull(store, args); };
-        commands["vfs"]    = [](StateStore& store[[maybe_unused]],
-                                ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::vfs(store, args); };
-        commands["help"]   = [](StateStore& store[[maybe_unused]],
-                                ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ Utils::print_usage(); };
+        commands["run"]     = [&handler](const std::vector<std::string>& args) { handler.run(args); };
+        commands["attach"]  = [&handler](const std::vector<std::string>& args) { handler.attach(args); };
+        commands["ps"]      = [&handler](const std::vector<std::string>& args) { handler.ps(args); };
+        commands["rm"]      = [&handler](const std::vector<std::string>& args) { handler.rm(args); };
+        commands["start"]   = [&handler](const std::vector<std::string>& args) { handler.start(args); };
+        commands["stop"]    = [&handler](const std::vector<std::string>& args) { handler.stop(args); };
+        commands["image"]   = [&handler](const std::vector<std::string>& args) { handler.image(args); };
+        commands["volume"]  = [&handler](const std::vector<std::string>& args) { handler.volume(args); };
+        commands["network"] = [&handler](const std::vector<std::string>& args) { handler.network(args); };
+        commands["create"]  = [&handler](const std::vector<std::string>& args) { handler.create(args); };
+        commands["pull"]    = [&handler](const std::vector<std::string>& args) { handler.pull(args); };
+        commands["vfs"]     = [&handler](const std::vector<std::string>& args) { handler.vfs(args); };
+        commands["help"]    = [](const std::vector<std::string>&) { Utils::print_usage(); };
 
         std::vector<std::string> cmds;
         for (int i = 2; i < argc; ++i) {
             cmds.emplace_back(argv[i]);
         }
 
-        auto it{commands.find(argv[1])};
+        auto it = commands.find(argv[1]);
         if (it == commands.end()) {
             Utils::print_usage();
             return EXIT_FAILURE;
         } else {
-            it->second(store, img_manager, cmds);
+            it->second(cmds);
         }
         return EXIT_SUCCESS;
     } catch (const std::exception& e) {

@@ -28,5 +28,6 @@ private:
     std::mutex m_mtx{};
     std::condition_variable m_cv{};
     std::atomic<bool> m_running{true};
+    pid_t m_owner_pid{-1};
     fs::path m_log_path{};
 };

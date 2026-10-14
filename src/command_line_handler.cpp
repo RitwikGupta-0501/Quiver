@@ -9,66 +9,62 @@
 #include <iostream>
 #include <algorithm>
 
-std::vector<VolumeMount> volumes{};
-std::vector<std::string> commands{};
-std::vector<std::pair<int,int>> forward_ports{};
-std::string image_name{""};
-std::string container_id{""};
-std::string container_name{""};
-pid_t container_pid{-1};
-std::string root_fs{""};
-std::string err{""};
-bool vfs_f{false};
-bool no_remove{false};
+CommandLineHandler::CommandLineHandler(StateStore& store, ImageManager& img_manager)
+    : m_store(store), m_img_manager(img_manager) {}
 
-void CommandLineHandler::run(StateStore& store, const std::vector<std::string>& cmds){
+void CommandLineHandler::run(const std::vector<std::string>& cmds) {
     if (cmds.empty()) {
         Utils::print_usage();
         return;
     }
-    size_t i{ 0 };
+
+    ContainerSpec spec;
+    spec.id = Utils::generate_container_id();
+
+    size_t i = 0;
     while (i < cmds.size()) {
-        const std::string& arg { cmds[i] };
+        const std::string& arg = cmds[i];
 
         if (arg == "-v" || arg == "--volume") {
             if (i + 1 < cmds.size()) {
-                std::string vol_str{ cmds[++i] };
-                size_t pos{ vol_str.find(':') };
+                std::string vol_str = cmds[++i];
+                size_t pos = vol_str.find(':');
                 if (pos != std::string::npos) {
-                    std::string host_str{ vol_str.substr(0, pos) };
-                    std::string cont_str{ vol_str.substr(pos + 1) };
+                    std::string host_str = vol_str.substr(0, pos);
+                    std::string cont_str = vol_str.substr(pos + 1);
 
                     if (host_str.empty() || cont_str.empty()) {
                         Utils::handle_error("Empty paths cannot be mounted");
                     }
-
                     if (host_str.front() != '/' || cont_str.front() != '/') {
                         Utils::handle_error("Paths must be absolute");
                     }
-                    if (!Utils::path_exists(host_str)){
+                    if (!Utils::path_exists(host_str)) {
                         Utils::handle_error("Host path " + host_str + " doesn't exist");
                     }
 
                     VolumeMount vol{};
                     vol.host_path = host_str;
                     vol.container_path = cont_str;
-                    volumes.emplace_back(vol);
-                }
-                else {
+                    spec.volumes.push_back(vol);
+                } else {
                     std::cerr << "Error: -v or --volume requires an argument\n";
                     return;
                 }
             }
-        }
-        else if (arg == "-p" || arg == "--port") {
+        } else if (arg == "-p" || arg == "--port") {
             if (i + 1 < cmds.size()) {
-                std::string port_str{ cmds[++i] };
-                size_t pos{ port_str.find(':') };
+                std::string port_str = cmds[++i];
+                size_t pos = port_str.find(':');
                 if (pos != std::string::npos) {
                     try {
-                        int host{ std::stoi(port_str.substr(0, pos)) };
-                        int cont{ std::stoi(port_str.substr(pos + 1)) };
-                        forward_ports.emplace_back(host, cont);
+                        int host = std::stoi(port_str.substr(0, pos));
+                        int cont = std::stoi(port_str.substr(pos + 1));
+                        PortMapping pm{};
+                        pm.host_port = host;
+                        pm.container_port = cont;
+                        pm.protocol = "tcp";
+                        spec.ports.push_back(pm);
                     } catch (...) {
                         std::cerr << "Error: Invalid port format " << port_str << "\n";
                         return;
@@ -78,28 +74,35 @@ void CommandLineHandler::run(StateStore& store, const std::vector<std::string>& 
                 std::cerr << "Error: -p or --port requires an argument\n";
                 return;
             }
-        }
-        else if(arg == "-n" || arg == "--name"){
-            if(i+1 < cmds.size()){
-                container_name = cmds[++i];
-            }
-            else{
+        } else if (arg == "-n" || arg == "--name") {
+            if (i + 1 < cmds.size()) {
+                spec.name = cmds[++i];
+            } else {
                 std::cerr << "Error: -n or --name requires an argument\n";
                 return;
             }
-        }
-        else if(arg == "--vfs"){
-            vfs_f = true;
-        }
-        else if(arg == "--no-remove"){
-            no_remove = true;
-        }
-        else if (arg == "-i" || arg == "--image") {
+        } else if (arg == "--vfs") {
+            spec.use_vfs = true;
+        } else if (arg == "--no-remove") {
+            spec.no_remove = true;
+        } else if (arg == "-i" || arg == "--image") {
             if (i + 1 < cmds.size()) {
-                image_name = cmds[++i];
+                spec.image = cmds[++i];
+            } else {
+                std::cerr << "Error: -i or --image requires an argument\n";
+                return;
             }
-        }
-        else {
+        } else if (arg == "--") {
+            for (size_t j = i + 1; j < cmds.size(); ++j) {
+                spec.command.push_back(cmds[j]);
+            }
+            break;
+        } else if (!arg.starts_with('-')) {
+            for (size_t j = i; j < cmds.size(); ++j) {
+                spec.command.push_back(cmds[j]);
+            }
+            break;
+        } else {
             std::cerr << "Unknown argument: " << arg << "\n";
             Utils::print_usage();
             return;
@@ -107,46 +110,85 @@ void CommandLineHandler::run(StateStore& store, const std::vector<std::string>& 
         i++;
     }
 
-    if (image_name.empty()) {
+    if (spec.image.empty()) {
         std::cerr << "Error: Image name required (-i)\n";
         return;
     }
 
-    CommandLineHandler::pull(store, {image_name});
-    container_id = Utils::generate_container_id();
-    Container container{ container_name, container_id.substr(0,6), root_fs, volumes, forward_ports, container_id, store, image_name, vfs_f, no_remove };
-    container.exec("/bin/bash", commands);
+    std::string out_path;
+    std::string error;
+    if (!m_img_manager.pull(spec.image, out_path, error)) {
+        std::cerr << "Error pulling image: " << error << '\n';
+        return;
+    }
+
+    std::string img_name, img_tag;
+    size_t colon_pos = spec.image.find(':');
+    if (colon_pos != std::string::npos) {
+        img_name = spec.image.substr(0, colon_pos);
+        img_tag = spec.image.substr(colon_pos + 1);
+    } else {
+        img_name = spec.image;
+        img_tag = "latest";
+    }
+
+    auto img_meta = m_store.get_image(img_name, img_tag);
+    if (img_meta.has_value()) {
+        spec.rootfs_path = img_meta->rootfs_path;
+        spec.env = img_meta->default_env;
+        if (!img_meta->working_dir.empty()) {
+            spec.working_dir = img_meta->working_dir;
+        }
+        if (spec.command.empty()) {
+            if (!img_meta->default_entrypoint.empty() || !img_meta->default_cmd.empty()) {
+                for (const auto& ep : img_meta->default_entrypoint) {
+                    spec.command.push_back(ep);
+                }
+                for (const auto& c : img_meta->default_cmd) {
+                    spec.command.push_back(c);
+                }
+            }
+        }
+    } else {
+        spec.rootfs_path = out_path;
+    }
+
+    if (spec.hostname.empty()) {
+        spec.hostname = spec.id.substr(0, 6);
+    }
+    if (spec.name.empty()) {
+        spec.name = "quiver-" + spec.id.substr(0, 12);
+    }
+
+    Container container{ spec, m_store };
+    container.start();
 }
 
-void CommandLineHandler::attach(StateStore& store, const std::vector<std::string>& cmds){
-    if(cmds.size() != 1){
+void CommandLineHandler::attach(const std::vector<std::string>& cmds) {
+    if (cmds.size() != 1) {
         Utils::print_usage();
         return;
     }
-    container_id = cmds[0];
-    auto opt = store.get_container(container_id);
+    std::string cid = cmds[0];
+    auto opt = m_store.get_container(cid);
     if (!opt) {
-        std::cerr << "Error: Container " << container_id << " not found.\n";
+        std::cerr << "Error: Container " << cid << " not found.\n";
         return;
     }
-    container_pid = opt->pid;
-    Container container;
-    container.connect_to_server(container_pid);
+    Container::attach(opt->pid);
 }
 
-void CommandLineHandler::ps(StateStore& store, const std::vector<std::string>& cmds){
-    if(cmds.size() > 1){
+void CommandLineHandler::ps(const std::vector<std::string>& cmds) {
+    if (cmds.size() > 1) {
         Utils::print_usage();
         return;
     }
-    std::vector<ContainerState> containers{};
-    if(cmds.empty()){
-        containers = store.list_containers(true);
-    }
-    else if(cmds.size() == 1 && cmds[0] == "-a"){
-        containers = store.list_containers(false);
-    }
-    else{
+    std::vector<ContainerState> containers;
+    if (cmds.empty()) {
+        containers = m_store.list_containers(true);
+    } else if (cmds.size() == 1 && cmds[0] == "-a") {
+        containers = m_store.list_containers(false);
+    } else {
         Utils::print_usage();
         return;
     }
@@ -162,39 +204,38 @@ void CommandLineHandler::ps(StateStore& store, const std::vector<std::string>& c
     }
 }
 
-void CommandLineHandler::rm(StateStore& store, const std::vector<std::string>& cmds){
-    if(cmds.empty()){
+void CommandLineHandler::rm(const std::vector<std::string>& cmds) {
+    if (cmds.empty()) {
         Utils::print_usage();
         return;
     }
-    for(const std::string& cmd : cmds){
-        auto opt = store.get_container(cmd);
-        if(!opt){
+    for (const std::string& cmd : cmds) {
+        auto opt = m_store.get_container(cmd);
+        if (!opt) {
             std::cerr << "Error: Container " << cmd << " doesn't exist\n";
             continue;
         }
 
         if (opt->status == "stopped" || opt->status == "exited") {
-            if (store.remove_container(opt->id)) {
+            if (m_store.remove_container(opt->id)) {
                 std::cout << "Container " << opt->id << " removed.\n";
             } else {
                 std::cerr << "Error: Failed to remove container " << opt->id << '\n';
             }
-        }
-        else {
+        } else {
             std::cerr << "Error: Container " << opt->id << " is running.\n";
         }
     }
 }
 
-void CommandLineHandler::image(StateStore& store, ImageManager& img_manager, const std::vector<std::string>& cmds){
+void CommandLineHandler::image(const std::vector<std::string>& cmds) {
     if (cmds.empty()) {
         Utils::print_usage();
         return;
     }
 
-    if(cmds[0] == "ls"){
-        std::vector<ImageMetadata> images = store.list_images();
+    if (cmds[0] == "ls") {
+        std::vector<ImageMetadata> images = m_store.list_images();
 
         std::cout << "NAME\tTAG\tCREATED AT\tROOTFS PATH\n";
         for (const auto& img : images) {
@@ -203,52 +244,46 @@ void CommandLineHandler::image(StateStore& store, ImageManager& img_manager, con
                 << img.created_at << "\t"
                 << img.rootfs_path << "\n";
         }
-    }
-    else if(cmds[0] == "rm"){
+    } else if (cmds[0] == "rm") {
         if (cmds.size() < 2) Utils::handle_error("Error: image_name:tag is required after rm");
-        size_t no_cmds{ cmds.size() };
-        for(size_t i{1}; i < no_cmds; ++i){
-            image_name = cmds[i];
-            size_t pos{ image_name.find(':') };
-            std::string name{};
-            std::string tag{};
-            if(pos != std::string::npos){
-                name = image_name.substr(0, pos);
-                tag = image_name.substr(pos + 1);
-            }
-            else{
-                name = image_name;
+        for (size_t i = 1; i < cmds.size(); ++i) {
+            std::string img_ref = cmds[i];
+            size_t pos = img_ref.find(':');
+            std::string name;
+            std::string tag;
+            if (pos != std::string::npos) {
+                name = img_ref.substr(0, pos);
+                tag = img_ref.substr(pos + 1);
+            } else {
+                name = img_ref;
                 tag = "latest";
             }
             std::string full_ref = name + ":" + tag;
-            std::vector<ContainerState> containers = store.list_containers_by_image(full_ref);
-            if(containers.empty()){
-                containers = store.list_containers_by_image(name);
+            std::vector<ContainerState> containers = m_store.list_containers_by_image(full_ref);
+            if (containers.empty()) {
+                containers = m_store.list_containers_by_image(name);
             }
-            if(!containers.empty()){
-                Utils::handle_error("Error: Image " + image_name + " is being used");
+            if (!containers.empty()) {
+                Utils::handle_error("Error: Image " + img_ref + " is being used");
             }
-            if(store.remove_image(name, tag)) {
-                std::cout << image_name << " removed from state store\n";
-            }
-            else{
-                std::cout << "Error: Cannot remove " << image_name << " from state store\n";
+            if (m_store.remove_image(name, tag)) {
+                std::cout << img_ref << " removed from state store\n";
+            } else {
+                std::cout << "Error: Cannot remove " << img_ref << " from state store\n";
                 exit(EXIT_FAILURE);
             }
             std::string local_err;
-            if(img_manager.remove(image_name, local_err)) {
-                std::cout << "Image " << image_name << " removed successfully from local storage.\n";
+            if (m_img_manager.remove(img_ref, local_err)) {
+                std::cout << "Image " << img_ref << " removed successfully from local storage.\n";
             } else {
-                std::cout << "Failed to remove image " << image_name << " from local storage: " << local_err << '\n';
+                std::cout << "Failed to remove image " << img_ref << " from local storage: " << local_err << '\n';
                 exit(EXIT_FAILURE);
             }
         }
-
-    }
-    else if(cmds[0] == "cls"){
-        if(cmds.size() == 2){
-            image_name = cmds[1];
-            std::vector<ContainerState> containers = store.list_containers_by_image(image_name);
+    } else if (cmds[0] == "cls") {
+        if (cmds.size() == 2) {
+            std::string img_name = cmds[1];
+            std::vector<ContainerState> containers = m_store.list_containers_by_image(img_name);
 
             std::cout << "CONTAINER ID\tNAME\tIMAGE\tPID\tSTATUS\tCREATED AT\tHOSTNAME\n";
             for (const auto& container : containers) {
@@ -260,24 +295,22 @@ void CommandLineHandler::image(StateStore& store, ImageManager& img_manager, con
                     << container.created_at << "\t"
                     << container.hostname << "\n";
             }
-        }
-        else{
+        } else {
             Utils::print_usage();
         }
-    }
-    else{
+    } else {
         Utils::print_usage();
     }
 }
 
-void CommandLineHandler::volume(StateStore& store, const std::vector<std::string>& cmds){
-    if(cmds.empty()){
+void CommandLineHandler::volume(const std::vector<std::string>& cmds) {
+    if (cmds.empty()) {
         Utils::print_usage();
         return;
     }
-    if(cmds[0] == "ls"){
+    if (cmds[0] == "ls") {
         std::cout << "CONTAINER ID\tHOST PATH\tCONTAINER PATH\tREAD ONLY\n";
-        for (const auto& c : store.list_containers(false)) {
+        for (const auto& c : m_store.list_containers(false)) {
             for (const auto& v : c.volumes) {
                 std::cout << c.id.substr(0, 12) << "\t"
                     << v.host_path << "\t"
@@ -285,40 +318,37 @@ void CommandLineHandler::volume(StateStore& store, const std::vector<std::string
                     << (v.read_only ? "ro" : "rw") << "\n";
             }
         }
-    }
-    else if(cmds[0] == "rm"){
+    } else if (cmds[0] == "rm") {
         if (cmds.size() < 2) {
             Utils::print_usage();
             return;
         }
-        // Remove matching volume paths across containers
         for (size_t i = 1; i < cmds.size(); ++i) {
             std::string target = cmds[i];
-            for (auto c : store.list_containers(false)) {
+            for (auto c : m_store.list_containers(false)) {
                 auto prev_size = c.volumes.size();
                 std::erase_if(c.volumes, [&](const VolumeMount& v) {
                     return v.host_path == target || v.container_path == target;
                 });
                 if (c.volumes.size() != prev_size) {
-                    store.save_container(c);
+                    m_store.save_container(c);
                     std::cout << "Removed volume " << target << " from container " << c.id.substr(0, 12) << "\n";
                 }
             }
         }
-    }
-    else{
+    } else {
         Utils::print_usage();
     }
 }
 
-void CommandLineHandler::network(StateStore& store, const std::vector<std::string>& cmds){
-    if(cmds.empty()){
+void CommandLineHandler::network(const std::vector<std::string>& cmds) {
+    if (cmds.empty()) {
         Utils::print_usage();
         return;
     }
-    if(cmds[0] == "ls"){
+    if (cmds[0] == "ls") {
         std::cout << "CONTAINER ID\tHOST PORT\tCONTAINER PORT\tPROTOCOL\n";
-        for (const auto& c : store.list_containers(false)) {
+        for (const auto& c : m_store.list_containers(false)) {
             for (const auto& p : c.ports) {
                 std::cout << c.id.substr(0, 12) << "\t"
                     << p.host_port << "\t"
@@ -326,35 +356,36 @@ void CommandLineHandler::network(StateStore& store, const std::vector<std::strin
                     << p.protocol << "\n";
             }
         }
-    }
-    else if(cmds[0] == "rm"){
+    } else if (cmds[0] == "rm") {
         if (cmds.size() < 2) {
             Utils::print_usage();
             return;
         }
         for (size_t i = 1; i < cmds.size(); ++i) {
             int port = std::stoi(cmds[i]);
-            for (auto c : store.list_containers(false)) {
+            for (auto c : m_store.list_containers(false)) {
                 auto prev_size = c.ports.size();
                 std::erase_if(c.ports, [&](const PortMapping& p) {
                     return p.host_port == port;
                 });
                 if (c.ports.size() != prev_size) {
-                    store.save_container(c);
+                    if (c.status == "running" && c.pid > 0) {
+                        Network::remove_port_forward(c.pid, port);
+                    }
+                    m_store.save_container(c);
                     std::cout << "Removed port " << port << " from container " << c.id.substr(0, 12) << "\n";
                 }
             }
         }
-    }
-    else if(cmds[0] == "add"){
-        if(cmds.size() < 3){
+    } else if (cmds[0] == "add") {
+        if (cmds.size() < 3) {
             Utils::print_usage();
             return;
         }
-        container_id = cmds[1];
-        auto opt = store.get_container(container_id);
-        if(!opt){
-            Utils::handle_error("Container " + container_id + " doesn't exist");
+        std::string cid = cmds[1];
+        auto opt = m_store.get_container(cid);
+        if (!opt) {
+            Utils::handle_error("Container " + cid + " doesn't exist");
             return;
         }
         ContainerState cs = *opt;
@@ -373,31 +404,30 @@ void CommandLineHandler::network(StateStore& store, const std::vector<std::strin
             pm.protocol = "tcp";
             cs.ports.push_back(pm);
 
-            if(cs.status == "running" && cs.pid > 0) {
+            if (cs.status == "running" && cs.pid > 0) {
                 Network::add_port_forward(cs.pid, h_port, c_port);
             }
         }
-        store.save_container(cs);
-    }
-    else{
+        m_store.save_container(cs);
+    } else {
         Utils::print_usage();
     }
 }
 
-void CommandLineHandler::create(StateStore& store, const std::vector<std::string>& cmds){
-    if(cmds.empty()) {
+void CommandLineHandler::create(const std::vector<std::string>& cmds) {
+    if (cmds.empty()) {
         Utils::print_usage();
         return;
     }
-    if(cmds[0] == "volume"){
-        if(cmds.size() < 3){
+    if (cmds[0] == "volume") {
+        if (cmds.size() < 3) {
             Utils::print_usage();
             return;
         }
-        container_id = cmds[1];
-        auto opt = store.get_container(container_id);
-        if(!opt){
-            Utils::handle_error("Container " + container_id + " doesn't exist");
+        std::string cid = cmds[1];
+        auto opt = m_store.get_container(cid);
+        if (!opt) {
+            Utils::handle_error("Container " + cid + " doesn't exist");
             return;
         }
         ContainerState cs = *opt;
@@ -413,132 +443,120 @@ void CommandLineHandler::create(StateStore& store, const std::vector<std::string
             vm.container_path = vol_str.substr(sep_pos + 1);
             cs.volumes.push_back(vm);
         }
-        store.save_container(cs);
-    }
-    else {
+        m_store.save_container(cs);
+    } else {
         Utils::print_usage();
     }
 }
 
-void CommandLineHandler::pull(StateStore& store, const std::vector<std::string>& cmds){
-    if(cmds.size() != 1){
+void CommandLineHandler::pull(const std::vector<std::string>& cmds) {
+    if (cmds.size() != 1) {
         Utils::print_usage();
         return;
     }
-    image_name = cmds[0];
-
-    ImageManager img_manager(store);
-    std::string out_path{};
-    std::string pull_err{};
-    if (!img_manager.pull(image_name, out_path, pull_err)) {
+    std::string img_name = cmds[0];
+    std::string out_path;
+    std::string pull_err;
+    if (!m_img_manager.pull(img_name, out_path, pull_err)) {
         std::cerr << "Error pulling image: " << pull_err << '\n';
         exit(EXIT_FAILURE);
     }
-    root_fs = out_path;
 }
 
-void CommandLineHandler::start(StateStore& store, const std::vector<std::string>& cmds){
-    if(cmds.size() != 1){
+void CommandLineHandler::start(const std::vector<std::string>& cmds) {
+    if (cmds.empty()) {
         std::cout << "Error: Container id is required\n";
         Utils::print_usage();
         return;
     }
-    container_id = cmds[0];
+    for (const auto& cid : cmds) {
+        auto opt = m_store.get_container(cid);
+        if (!opt) {
+            std::cerr << "Error: Container " << cid << " not found.\n";
+            continue;
+        }
+        ContainerSpec spec{};
+        spec.id = opt->id;
+        spec.name = opt->name;
+        spec.image = opt->image;
+        spec.hostname = opt->hostname;
+        spec.rootfs_path = opt->rootfs_path;
+        spec.command = opt->command;
+        spec.use_vfs = opt->use_vfs;
+        spec.no_remove = opt->no_remove;
+        spec.volumes = opt->volumes;
+        spec.ports = opt->ports;
+        spec.resources = opt->resources;
 
-    auto opt = store.get_container(container_id);
-    if (!opt) {
-        std::cerr << "Error: Container " << container_id << " not found.\n";
-        return;
+        std::string img_name, img_tag;
+        size_t colon_pos = spec.image.find(':');
+        if (colon_pos != std::string::npos) {
+            img_name = spec.image.substr(0, colon_pos);
+            img_tag = spec.image.substr(colon_pos + 1);
+        } else {
+            img_name = spec.image;
+            img_tag = "latest";
+        }
+        auto img_meta = m_store.get_image(img_name, img_tag);
+        if (img_meta.has_value()) {
+            spec.env = img_meta->default_env;
+            if (!img_meta->working_dir.empty()) {
+                spec.working_dir = img_meta->working_dir;
+            }
+        }
+
+        std::cout << "Starting container " << spec.id << "...\n";
+        Container container{ spec, m_store };
+        container.start();
     }
-    ContainerState cs = *opt;
-
-    std::string c_name = cs.name;
-    image_name = cs.image;
-
-    std::vector<std::pair<int,int>> ports{};
-    for (const auto& p : cs.ports) {
-        ports.emplace_back(p.host_port, p.container_port);
-    }
-
-    Container container{
-        c_name,
-        cs.hostname,
-        cs.rootfs_path,
-        cs.volumes,
-        ports,
-        cs.id,
-        store,
-        image_name,
-        cs.use_vfs,
-        cs.no_remove
-    };
-
-    if (store.update_container_status(cs.id, "running")) {
-        std::cout << "Starting container " << cs.id << "...\n";
-    } else {
-        std::cout << "Failed to update status of " << cs.id << " to RUNNING.\n";
-        return;
-    }
-
-    container.exec("/bin/bash", commands);
 }
 
-void CommandLineHandler::stop(StateStore& store, const std::vector<std::string>& cmds){
-    if(cmds.size() != 1){
+void CommandLineHandler::stop(const std::vector<std::string>& cmds) {
+    if (cmds.empty()) {
         std::cout << "Error: Container id is required\n";
         Utils::print_usage();
         return;
     }
-    container_id = cmds[0];
-
-    auto opt = store.get_container(container_id);
-    if(!opt) {
-        std::cerr << "Error: Container not found.\n";
-        return;
-    }
-
-    container_pid = opt->pid;
-    pid_t net_pid{ opt->net_pid };
-
-    Container container{};
-    container.stop(container_pid, net_pid);
-
-    if (store.update_container_status(opt->id, "stopped")) {
-        std::cout << "Container " << opt->id << " stopped successfully.\n";
-    } else {
-        std::cout << "Failed to update status of " << opt->id << " in state store.\n";
+    for (const auto& cid : cmds) {
+        auto opt = m_store.get_container(cid);
+        if (!opt) {
+            std::cerr << "Error: Container " << cid << " not found.\n";
+            continue;
+        }
+        Container::stop(opt->pid, opt->net_pid);
+        if (m_store.update_container_status(opt->id, "stopped")) {
+            std::cout << "Container " << opt->id << " stopped successfully.\n";
+        } else {
+            std::cout << "Failed to update status of " << opt->id << " in state store.\n";
+        }
     }
 }
 
-void CommandLineHandler::vfs(StateStore& store, const std::vector<std::string>& cmds){
-    if(cmds.size() != 2){
+void CommandLineHandler::vfs(const std::vector<std::string>& cmds) {
+    if (cmds.size() != 2) {
         Utils::print_usage();
         return;
     }
-    if(cmds[0] == "rm"){
-        container_id = cmds[1];
-        auto opt = store.get_container(container_id);
-        if(opt){
-            if(opt->no_remove){
-                if(!opt->bundle_path.empty()){
-                    if(Utils::remove_directory_recursively(opt->bundle_path) == ERR){
+    if (cmds[0] == "rm") {
+        std::string cid = cmds[1];
+        auto opt = m_store.get_container(cid);
+        if (opt) {
+            if (opt->no_remove) {
+                if (!opt->bundle_path.empty()) {
+                    if (Utils::remove_directory_recursively(opt->bundle_path) == ERR) {
                         Utils::handle_error("Unable to remove vfs path");
                     }
-                    store.remove_container(opt->id);
+                    m_store.remove_container(opt->id);
+                } else {
+                    Utils::handle_error(cid + " has no vfs linked");
                 }
-                else{
-                    Utils::handle_error(container_id + " has no vfs linked");
-                }
-            }
-            else{
+            } else {
                 Utils::handle_error("--no-remove flag was not specified while starting container");
             }
+        } else {
+            Utils::handle_error("Provided " + cid + " doesn't exist");
         }
-        else{
-            Utils::handle_error("Provided " + container_id + " doesn't exist");
-        }
-    }
-    else{
+    } else {
         Utils::print_usage();
     }
 }
