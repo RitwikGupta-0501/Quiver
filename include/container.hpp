@@ -1,7 +1,7 @@
 #pragma once
 #include <string>
 #include <vector>
-#include "database_manager.hpp"
+#include "state_store.hpp"
 #include "terminal.hpp"
 #include "network.hpp"
 
@@ -20,10 +20,10 @@ class Container{
         explicit Container(const std::string& container_name,
                            const std::string& hostname,
                            const std::string& new_fs,
-                           const std::vector<VolumeObject>& volumes,
+                           const std::vector<VolumeMount>& volumes,
                            const std::vector<std::pair<int,int>>& ports,
                            const std::string& container_id,
-                           DatabaseManager& db,
+                           StateStore& store,
                            const std::string& image_name,
                            bool vfs,
                            bool no_remove);
@@ -39,7 +39,7 @@ class Container{
         void setup_user_namespace();
         void run(const std::string& path, const std::string& container_id);
         void run_container(const ContainerArgs& args);
-        static DatabaseManager* m_db;
+        static StateStore* m_store;
         static std::string m_container_id;
         static std::string m_container_name;
         static bool m_vfs;
@@ -47,7 +47,7 @@ class Container{
         static pid_t m_child_pid;
         static std::string m_new_fs;
         static std::string m_new_hostname;
-        static std::vector<VolumeObject> m_volumes;
+        static std::vector<VolumeMount> m_volumes;
         static std::vector<std::string> m_commands;
         static std::vector<std::pair<int,int>> m_forward_ports;
         static Terminal m_term;

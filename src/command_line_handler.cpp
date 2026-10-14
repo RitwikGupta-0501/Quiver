@@ -1,5 +1,5 @@
 #include "utils.hpp"
-#include "database_manager.hpp"
+#include "state_store.hpp"
 #include "image_manager.hpp"
 #include "command_line_handler.hpp"
 #include "container.hpp"
@@ -7,8 +7,9 @@
 #include <unistd.h>
 #include <vector>
 #include <iostream>
+#include <algorithm>
 
-std::vector<VolumeObject> volumes{};
+std::vector<VolumeMount> volumes{};
 std::vector<std::string> commands{};
 std::vector<std::pair<int,int>> forward_ports{};
 std::string image_name{""};
@@ -20,8 +21,7 @@ std::string err{""};
 bool vfs_f{false};
 bool no_remove{false};
 
-
-void CommandLineHandler::run(DatabaseManager& db, const std::vector<std::string>& cmds){
+void CommandLineHandler::run(StateStore& store, const std::vector<std::string>& cmds){
     if (cmds.empty()) {
         Utils::print_usage();
         return;
@@ -49,7 +49,7 @@ void CommandLineHandler::run(DatabaseManager& db, const std::vector<std::string>
                         Utils::handle_error("Host path " + host_str + " doesn't exist");
                     }
 
-                    VolumeObject vol{};
+                    VolumeMount vol{};
                     vol.host_path = host_str;
                     vol.container_path = cont_str;
                     volumes.emplace_back(vol);
@@ -98,7 +98,6 @@ void CommandLineHandler::run(DatabaseManager& db, const std::vector<std::string>
             if (i + 1 < cmds.size()) {
                 image_name = cmds[++i];
             }
-
         }
         else {
             std::cerr << "Unknown argument: " << arg << "\n";
@@ -113,130 +112,134 @@ void CommandLineHandler::run(DatabaseManager& db, const std::vector<std::string>
         return;
     }
 
-    CommandLineHandler::pull(db, {image_name});
+    CommandLineHandler::pull(store, {image_name});
     container_id = Utils::generate_container_id();
-    Container container{ container_name, container_id.substr(0,6), root_fs, volumes, forward_ports, container_id, db, image_name, vfs_f, no_remove };
+    Container container{ container_name, container_id.substr(0,6), root_fs, volumes, forward_ports, container_id, store, image_name, vfs_f, no_remove };
     container.exec("/bin/bash", commands);
 }
 
-void CommandLineHandler::attach(DatabaseManager& db_manager, const std::vector<std::string>& cmds){
+void CommandLineHandler::attach(StateStore& store, const std::vector<std::string>& cmds){
     if(cmds.size() != 1){
         Utils::print_usage();
         return;
     }
     container_id = cmds[0];
-    container_pid = { db_manager.get_container(container_id).pid };
+    auto opt = store.get_container(container_id);
+    if (!opt) {
+        std::cerr << "Error: Container " << container_id << " not found.\n";
+        return;
+    }
+    container_pid = opt->pid;
     Container container;
     container.connect_to_server(container_pid);
 }
 
-void CommandLineHandler::ps(DatabaseManager& db_manager, const std::vector<std::string>& cmds){
+void CommandLineHandler::ps(StateStore& store, const std::vector<std::string>& cmds){
     if(cmds.size() > 1){
         Utils::print_usage();
         return;
     }
-    std::vector<ContainerObject> containers{};
-    if(cmds.size() == 0){
-        containers = db_manager.list_running_containers();
+    std::vector<ContainerState> containers{};
+    if(cmds.empty()){
+        containers = store.list_containers(true);
     }
     else if(cmds.size() == 1 && cmds[0] == "-a"){
-        containers = db_manager.list_all_containers();
+        containers = store.list_containers(false);
     }
     else{
         Utils::print_usage();
         return;
     }
 
-    std::cout << "CONTAINER ID\tNAME\tIMAGE\tSTATUS\tCREATED AT\tVFS PATH\n";
+    std::cout << "CONTAINER ID\tNAME\tIMAGE\tSTATUS\tCREATED AT\tBUNDLE PATH\n";
     for (const auto& container : containers) {
-        std::cout << container.id << "\t"
+        std::cout << container.id.substr(0, 12) << "\t"
             << container.name << "\t"
             << container.image << "\t"
             << container.status << "\t"
             << container.created_at << "\t"
-            << container.vfs_path << '\n';
+            << container.bundle_path << '\n';
     }
 }
 
-void CommandLineHandler::rm(DatabaseManager& db_manager, const std::vector<std::string>& cmds){
+void CommandLineHandler::rm(StateStore& store, const std::vector<std::string>& cmds){
     if(cmds.empty()){
         Utils::print_usage();
         return;
     }
     for(const std::string& cmd : cmds){
-        container_id = cmd;
-        ContainerObject container_obj{ db_manager.get_container(container_id) };
+        auto opt = store.get_container(cmd);
+        if(!opt){
+            std::cerr << "Error: Container " << cmd << " doesn't exist\n";
+            continue;
+        }
 
-        if(db_manager.container_exists(container_id)){
-            if(!container_obj.vfs_path.empty()){
-                if(Utils::remove_directory_recursively(container_obj.vfs_path) == ERR){
-                    Utils::handle_error("Unable to remove container");
-                }
-            }
-            if ((container_obj.status == "stopped" || container_obj.status == "exited") && db_manager.remove_container(container_id)) {
-                db_manager.remove_volumes_by_id(container_id);
-                db_manager.remove_networks_by_id(container_id);
-                std::cout << "Container " << container_id << " removed.\n";
-            }
-            else {
-                Utils::handle_error(container_id + " is running.");
+        if (opt->status == "stopped" || opt->status == "exited") {
+            if (store.remove_container(opt->id)) {
+                std::cout << "Container " << opt->id << " removed.\n";
+            } else {
+                std::cerr << "Error: Failed to remove container " << opt->id << '\n';
             }
         }
-        else{
-            Utils::handle_error(container_id + " doesn't exist");
+        else {
+            std::cerr << "Error: Container " << opt->id << " is running.\n";
         }
     }
 }
 
-void CommandLineHandler::image(DatabaseManager& db_manager, ImageManager& img_manager, const std::vector<std::string>&  cmds){
+void CommandLineHandler::image(StateStore& store, ImageManager& img_manager, const std::vector<std::string>& cmds){
     if (cmds.empty()) {
         Utils::print_usage();
         return;
     }
 
     if(cmds[0] == "ls"){
-        std::vector<ImageObject> images = db_manager.list_all_images();
+        std::vector<ImageMetadata> images = store.list_images();
 
-        std::cout << "IMAGE ID\tNAME\tTAG\tCREATED AT\n";
-        for (const auto& image : images) {
-            std::cout << image.id << "\t"
-                << image.name << "\t"
-                << image.tag << "\t"
-                << image.created_at << "\n";
+        std::cout << "NAME\tTAG\tCREATED AT\tROOTFS PATH\n";
+        for (const auto& img : images) {
+            std::cout << img.name << "\t"
+                << img.tag << "\t"
+                << img.created_at << "\t"
+                << img.rootfs_path << "\n";
         }
     }
     else if(cmds[0] == "rm"){
         if (cmds.size() < 2) Utils::handle_error("Error: image_name:tag is required after rm");
         size_t no_cmds{ cmds.size() };
-        for(size_t i{1};i<no_cmds;++i){
+        for(size_t i{1}; i < no_cmds; ++i){
             image_name = cmds[i];
             size_t pos{ image_name.find(':') };
             std::string name{};
             std::string tag{};
             if(pos != std::string::npos){
-                name = image_name.substr(0,pos);
-                tag = image_name.substr(pos+1);
+                name = image_name.substr(0, pos);
+                tag = image_name.substr(pos + 1);
             }
             else{
                 name = image_name;
                 tag = "latest";
             }
-            std::vector<ContainerObject> containers{ db_manager.list_containers_by_image(name, tag) };
+            std::string full_ref = name + ":" + tag;
+            std::vector<ContainerState> containers = store.list_containers_by_image(full_ref);
+            if(containers.empty()){
+                containers = store.list_containers_by_image(name);
+            }
             if(!containers.empty()){
                 Utils::handle_error("Error: Image " + image_name + " is being used");
             }
-            std::string err;
-            if(db_manager.remove_image(name, tag)) {
-                std::cout << image_name << " Removed from database\n";
+            if(store.remove_image(name, tag)) {
+                std::cout << image_name << " removed from state store\n";
             }
             else{
-                std::cout << "Error: Cannot remove " << image_name << " from database\n";
+                std::cout << "Error: Cannot remove " << image_name << " from state store\n";
                 exit(EXIT_FAILURE);
             }
-            if(img_manager.remove(image_name, err)) {
+            std::string local_err;
+            if(img_manager.remove(image_name, local_err)) {
                 std::cout << "Image " << image_name << " removed successfully from local storage.\n";
             } else {
-                std::cout << "Failed to remove image " << image_name << " from local storage.\n";
+                std::cout << "Failed to remove image " << image_name << " from local storage: " << local_err << '\n';
                 exit(EXIT_FAILURE);
             }
         }
@@ -245,27 +248,17 @@ void CommandLineHandler::image(DatabaseManager& db_manager, ImageManager& img_ma
     else if(cmds[0] == "cls"){
         if(cmds.size() == 2){
             image_name = cmds[1];
-            size_t pos{ image_name.find(':') };
-            std::string name{};
-            std::string tag{};
-            if(pos != std::string::npos){
-                name = image_name.substr(0,pos);
-                tag = image_name.substr(pos+1);
-            }
-            else{
-                name = image_name;
-                tag = "latest";
-            }
-            std::vector<ContainerObject> containers{ db_manager.list_containers_by_image(name, tag) };
+            std::vector<ContainerState> containers = store.list_containers_by_image(image_name);
 
-            std::cout << "CONTAINER ID\tNAME\tIMAGE\tPID\tSTATUS\tCREATED AT\tHOSTNAME\tFILESYSTEM PATH\tPTY SHELL\n";
+            std::cout << "CONTAINER ID\tNAME\tIMAGE\tPID\tSTATUS\tCREATED AT\tHOSTNAME\n";
             for (const auto& container : containers) {
-                std::cout << container.id << "\t"
+                std::cout << container.id.substr(0, 12) << "\t"
                     << container.name << "\t"
                     << container.image << "\t"
+                    << container.pid << "\t"
                     << container.status << "\t"
                     << container.created_at << "\t"
-                    << container.hostname << "\t";
+                    << container.hostname << "\n";
             }
         }
         else{
@@ -277,161 +270,174 @@ void CommandLineHandler::image(DatabaseManager& db_manager, ImageManager& img_ma
     }
 }
 
-void CommandLineHandler::volume(DatabaseManager& db_manager, const std::vector<std::string>& cmds){
+void CommandLineHandler::volume(StateStore& store, const std::vector<std::string>& cmds){
     if(cmds.empty()){
         Utils::print_usage();
         return;
     }
     if(cmds[0] == "ls"){
-        std::vector<VolumeObject> volumes = db_manager.list_all_volumes();
-        std::cout << "VOLUME ID\tCONTAINER ID\tHOST PATH\tCONTAINER PATH\n";
-        for (const auto& volume : volumes) {
-            std::cout << volume.id << "\t"
-                << volume.container_id << "\t"
-                << volume.host_path << "\t"
-                << volume.container_path << "\n";
+        std::cout << "CONTAINER ID\tHOST PATH\tCONTAINER PATH\tREAD ONLY\n";
+        for (const auto& c : store.list_containers(false)) {
+            for (const auto& v : c.volumes) {
+                std::cout << c.id.substr(0, 12) << "\t"
+                    << v.host_path << "\t"
+                    << v.container_path << "\t"
+                    << (v.read_only ? "ro" : "rw") << "\n";
+            }
         }
     }
     else if(cmds[0] == "rm"){
-        size_t i{ 1 };
-        while(i < cmds.size()){
-            int volume_id{ std::stoi(cmds[i]) };
-            if(db_manager.volume_exists(volume_id)){
-                if(db_manager.remove_volume(volume_id)){
-                    std::cout << "Successfully removed " + cmds[i] + " volume\n";
-                }
-                else{
-                    Utils::handle_error("Unable to remove " + std::to_string(volume_id));
-                }
-            }
-            else{
-                Utils::handle_error(std::to_string(volume_id) + " doesn't exist");
-            }
-            ++i;
-        }
-    }
-    else{
-        Utils::print_usage();
-    }
-}
-
-void CommandLineHandler::network(DatabaseManager &db_manager, const std::vector<std::string> &cmds){
-    if(cmds.empty()){
-        Utils::print_usage();
-        return;
-    }
-    if(cmds[0] == "ls"){
-        std::vector<NetworkObject> networks{ db_manager.get_all_networks() };
-        std::cout << "NETWORK ID\tCONTAINER ID\tHOST PORT\tCONTAINER PORT\n";
-        for (const NetworkObject& network : networks) {
-            std::cout << network.id << "\t"
-                << network.container_id << "\t"
-                << network.host_port << "\t"
-                << network.container_port << "\n";
-        }
-    }
-    else if(cmds[0] == "rm"){
-        size_t i{ 1 };
-        while(i < cmds.size()){
-            int network_id{ std::stoi(cmds[i]) };
-            if(db_manager.network_exists(network_id)){
-                if(db_manager.remove_network(network_id)){
-                    std::cout << "Successfully removed " + cmds[i] + " network\n";
-                }
-                else{
-                    Utils::handle_error("Unable to remove " + std::to_string(network_id));
-                }
-            }
-            else{
-                Utils::handle_error(std::to_string(network_id) + " doesn't exist");
-            }
-            ++i;
-        }
-    }
-    else if(cmds[0] == "add"){
-        container_id = cmds.size() >= 2 ? cmds[1] : "";
-        std::string status{};
-        if(container_id.empty()){
+        if (cmds.size() < 2) {
             Utils::print_usage();
             return;
         }
-        if(db_manager.container_exists(container_id)){
-            container_pid = db_manager.get_container(container_id).pid;
-            status = db_manager.get_container(container_id).status;
-        }
-        else{
-            Utils::handle_error(container_id + " doesn't exists");
-        }
-        size_t i{ 2 };
-        while(i < cmds.size()){
-            std::string network{ cmds[i] };
-            size_t sep_pos { network.find(':') };
-            if (sep_pos == std::string::npos) {
-                std::cerr << "Invalid network format. Expected host_port:container_port\n";
-                break;
+        // Remove matching volume paths across containers
+        for (size_t i = 1; i < cmds.size(); ++i) {
+            std::string target = cmds[i];
+            for (auto c : store.list_containers(false)) {
+                auto prev_size = c.volumes.size();
+                std::erase_if(c.volumes, [&](const VolumeMount& v) {
+                    return v.host_path == target || v.container_path == target;
+                });
+                if (c.volumes.size() != prev_size) {
+                    store.save_container(c);
+                    std::cout << "Removed volume " << target << " from container " << c.id.substr(0, 12) << "\n";
+                }
             }
-            std::string host_port{ network.substr(0, sep_pos) };
-            std::string container_port{ network.substr(sep_pos + 1) };
-            NetworkObject net{};
-            net.container_id = container_id;
-            net.host_port = std::stoi(host_port);
-            net.container_port = std::stoi(container_port);
-            db_manager.add_ports(net);
-            if(status == "running") Network::add_port_forward(container_pid, std::stoi(host_port), std::stoi(container_port));
-            ++i;
         }
-        if(i == 2) Utils::print_usage();
     }
     else{
         Utils::print_usage();
     }
 }
 
-void CommandLineHandler::create(DatabaseManager& db_manager,const std::vector<std::string>& cmds){
-    if(cmds[0] == "volume"){
-        size_t i{ 2 };
-        while (i < cmds.size()) {
-            container_id = cmds[1];
-            if(!db_manager.container_exists(container_id)){
-                Utils::handle_error(container_id + " doesn't exists");
+void CommandLineHandler::network(StateStore& store, const std::vector<std::string>& cmds){
+    if(cmds.empty()){
+        Utils::print_usage();
+        return;
+    }
+    if(cmds[0] == "ls"){
+        std::cout << "CONTAINER ID\tHOST PORT\tCONTAINER PORT\tPROTOCOL\n";
+        for (const auto& c : store.list_containers(false)) {
+            for (const auto& p : c.ports) {
+                std::cout << c.id.substr(0, 12) << "\t"
+                    << p.host_port << "\t"
+                    << p.container_port << "\t"
+                    << p.protocol << "\n";
             }
-            std::string volume_input{ cmds[i] };
-            size_t sep_pos { volume_input.find(':') };
-            if (sep_pos == std::string::npos) {
-                std::cerr << "Invalid volume format. Expected host_path:container_path\n";
-                break;
-            }
-            std::string host_path{ volume_input.substr(0, sep_pos) };
-            std::string container_path{ volume_input.substr(sep_pos + 1) };
-
-            VolumeObject volume;
-            volume.container_id = container_id;
-            volume.host_path = host_path;
-            volume.container_path = container_path;
-
-            db_manager.add_volume(volume);
-            ++i;
         }
+    }
+    else if(cmds[0] == "rm"){
+        if (cmds.size() < 2) {
+            Utils::print_usage();
+            return;
+        }
+        for (size_t i = 1; i < cmds.size(); ++i) {
+            int port = std::stoi(cmds[i]);
+            for (auto c : store.list_containers(false)) {
+                auto prev_size = c.ports.size();
+                std::erase_if(c.ports, [&](const PortMapping& p) {
+                    return p.host_port == port;
+                });
+                if (c.ports.size() != prev_size) {
+                    store.save_container(c);
+                    std::cout << "Removed port " << port << " from container " << c.id.substr(0, 12) << "\n";
+                }
+            }
+        }
+    }
+    else if(cmds[0] == "add"){
+        if(cmds.size() < 3){
+            Utils::print_usage();
+            return;
+        }
+        container_id = cmds[1];
+        auto opt = store.get_container(container_id);
+        if(!opt){
+            Utils::handle_error("Container " + container_id + " doesn't exist");
+            return;
+        }
+        ContainerState cs = *opt;
+        for (size_t i = 2; i < cmds.size(); ++i) {
+            std::string net_str = cmds[i];
+            size_t sep_pos = net_str.find(':');
+            if (sep_pos == std::string::npos) {
+                std::cerr << "Invalid port format: " << net_str << "\n";
+                continue;
+            }
+            int h_port = std::stoi(net_str.substr(0, sep_pos));
+            int c_port = std::stoi(net_str.substr(sep_pos + 1));
+            PortMapping pm{};
+            pm.host_port = h_port;
+            pm.container_port = c_port;
+            pm.protocol = "tcp";
+            cs.ports.push_back(pm);
+
+            if(cs.status == "running" && cs.pid > 0) {
+                Network::add_port_forward(cs.pid, h_port, c_port);
+            }
+        }
+        store.save_container(cs);
+    }
+    else{
+        Utils::print_usage();
     }
 }
 
-void CommandLineHandler::pull(DatabaseManager& db_manager, const std::vector<std::string>& cmds){
+void CommandLineHandler::create(StateStore& store, const std::vector<std::string>& cmds){
+    if(cmds.empty()) {
+        Utils::print_usage();
+        return;
+    }
+    if(cmds[0] == "volume"){
+        if(cmds.size() < 3){
+            Utils::print_usage();
+            return;
+        }
+        container_id = cmds[1];
+        auto opt = store.get_container(container_id);
+        if(!opt){
+            Utils::handle_error("Container " + container_id + " doesn't exist");
+            return;
+        }
+        ContainerState cs = *opt;
+        for (size_t i = 2; i < cmds.size(); ++i) {
+            std::string vol_str = cmds[i];
+            size_t sep_pos = vol_str.find(':');
+            if (sep_pos == std::string::npos) {
+                std::cerr << "Invalid volume format: " << vol_str << "\n";
+                continue;
+            }
+            VolumeMount vm{};
+            vm.host_path = vol_str.substr(0, sep_pos);
+            vm.container_path = vol_str.substr(sep_pos + 1);
+            cs.volumes.push_back(vm);
+        }
+        store.save_container(cs);
+    }
+    else {
+        Utils::print_usage();
+    }
+}
+
+void CommandLineHandler::pull(StateStore& store, const std::vector<std::string>& cmds){
     if(cmds.size() != 1){
         Utils::print_usage();
         return;
     }
     image_name = cmds[0];
 
-    ImageManager img_manager(db_manager);
+    ImageManager img_manager(store);
     std::string out_path{};
-    std::string err{};
-    if (!img_manager.pull(image_name, out_path, err)) {
+    std::string pull_err{};
+    if (!img_manager.pull(image_name, out_path, pull_err)) {
+        std::cerr << "Error pulling image: " << pull_err << '\n';
         exit(EXIT_FAILURE);
     }
     root_fs = out_path;
 }
 
-void CommandLineHandler::start(DatabaseManager& db_manager, const std::vector<std::string>& cmds){
+void CommandLineHandler::start(StateStore& store, const std::vector<std::string>& cmds){
     if(cmds.size() != 1){
         std::cout << "Error: Container id is required\n";
         Utils::print_usage();
@@ -439,43 +445,45 @@ void CommandLineHandler::start(DatabaseManager& db_manager, const std::vector<st
     }
     container_id = cmds[0];
 
-    ContainerObject container_obj{ db_manager.get_container(container_id) };
-    if (container_obj.id.empty()) {
+    auto opt = store.get_container(container_id);
+    if (!opt) {
         std::cerr << "Error: Container " << container_id << " not found.\n";
         return;
     }
+    ContainerState cs = *opt;
 
-    std::string container_name{ container_obj.name };
-    image_name = container_obj.image;
+    std::string c_name = cs.name;
+    image_name = cs.image;
 
-    std::vector<VolumeObject> vols{ db_manager.get_container_volumes(container_id) };
-
-    forward_ports = db_manager.get_linked_ports(container_id);
+    std::vector<std::pair<int,int>> ports{};
+    for (const auto& p : cs.ports) {
+        ports.emplace_back(p.host_port, p.container_port);
+    }
 
     Container container{
-        container_name,
-            container_id.substr(0,6),
-            container_obj.filesystem_path,
-            vols,
-            forward_ports,
-            container_id,
-            db_manager,
-            image_name,
-            container_obj.vfs,
-            container_obj.no_remove
+        c_name,
+        cs.hostname,
+        cs.rootfs_path,
+        cs.volumes,
+        ports,
+        cs.id,
+        store,
+        image_name,
+        cs.use_vfs,
+        cs.no_remove
     };
 
-    if (db_manager.update_container_status(container_id, "running")) {
-        std::cout << "Starting container " << container_id << "...\n";
+    if (store.update_container_status(cs.id, "running")) {
+        std::cout << "Starting container " << cs.id << "...\n";
     } else {
-        std::cout << "Failed to update status of " << container_id << " to RUNNING.\n";
+        std::cout << "Failed to update status of " << cs.id << " to RUNNING.\n";
         return;
     }
 
     container.exec("/bin/bash", commands);
 }
 
-void CommandLineHandler::stop(DatabaseManager& db_manager, const std::vector<std::string>& cmds){
+void CommandLineHandler::stop(StateStore& store, const std::vector<std::string>& cmds){
     if(cmds.size() != 1){
         std::cout << "Error: Container id is required\n";
         Utils::print_usage();
@@ -483,43 +491,43 @@ void CommandLineHandler::stop(DatabaseManager& db_manager, const std::vector<std
     }
     container_id = cmds[0];
 
-    ContainerObject obj{ db_manager.get_container(container_id) };
-    if(obj.id.empty()) {
+    auto opt = store.get_container(container_id);
+    if(!opt) {
         std::cerr << "Error: Container not found.\n";
         return;
     }
 
-    container_pid = obj.pid;
-    pid_t net_pid{ obj.net_pid };
+    container_pid = opt->pid;
+    pid_t net_pid{ opt->net_pid };
 
     Container container{};
     container.stop(container_pid, net_pid);
 
-    if (db_manager.update_container_status(container_id, "stopped")) {
-        std::cout << "Container " << container_id << " stopped successfully.\n";
+    if (store.update_container_status(opt->id, "stopped")) {
+        std::cout << "Container " << opt->id << " stopped successfully.\n";
     } else {
-        std::cout << "Failed to update status of " << container_id << " in database.\n";
+        std::cout << "Failed to update status of " << opt->id << " in state store.\n";
     }
 }
 
-void CommandLineHandler::vfs(DatabaseManager &db_manager, const std::vector<std::string> &cmds){
+void CommandLineHandler::vfs(StateStore& store, const std::vector<std::string>& cmds){
     if(cmds.size() != 2){
         Utils::print_usage();
         return;
     }
     if(cmds[0] == "rm"){
         container_id = cmds[1];
-        if(db_manager.container_exists(container_id)){
-            if(db_manager.get_container(container_id).no_remove){
-                std::string vfs_path{ db_manager.get_container(container_id).vfs };
-                if(!vfs_path.empty()){
-                    if(Utils::remove_directory_recursively(vfs_path) == ERR){
+        auto opt = store.get_container(container_id);
+        if(opt){
+            if(opt->no_remove){
+                if(!opt->bundle_path.empty()){
+                    if(Utils::remove_directory_recursively(opt->bundle_path) == ERR){
                         Utils::handle_error("Unable to remove vfs path");
                     }
-                    db_manager.remove_vfs(container_id);
+                    store.remove_container(opt->id);
                 }
                 else{
-                    Utils::handle_error(container_id + " have no vfs linked");
+                    Utils::handle_error(container_id + " has no vfs linked");
                 }
             }
             else{

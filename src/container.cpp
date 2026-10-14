@@ -1,10 +1,8 @@
 #include "../include/container.hpp"
 #include "../include/utils.hpp"
 #include "../include/network.hpp"
-#include "../include/package_manager.hpp"
 #include "../include/mount.hpp"
 #include "../include/device_manager.hpp"
-#include "../include/container_management.hpp"
 #include <cstdlib>
 #include <iostream>
 #include <sched.h>
@@ -18,12 +16,12 @@
 bool Container::m_vfs{ false };
 bool Container::m_no_remove{ false };
 pid_t Container::m_child_pid{ -1 };
-DatabaseManager* Container::m_db{nullptr};
-std::string Container::m_container_name{""};
-std::string Container::m_container_id{""};
-std::string Container::m_new_hostname{""};
-std::string Container::m_new_fs{""};
-std::vector<VolumeObject> Container::m_volumes{};
+StateStore* Container::m_store{ nullptr };
+std::string Container::m_container_name{ "" };
+std::string Container::m_container_id{ "" };
+std::string Container::m_new_hostname{ "" };
+std::string Container::m_new_fs{ "" };
+std::vector<VolumeMount> Container::m_volumes{};
 std::vector<std::string> Container::m_commands{};
 std::vector<std::pair<int,int>> Container::m_forward_ports{};
 Terminal Container::m_term{};
@@ -33,10 +31,10 @@ std::string Container::m_image_name{ "" };
 Container::Container(const std::string& container_name,
                      const std::string& hostname,
                      const std::string& new_fs,
-                     const std::vector<VolumeObject>& volumes,
+                     const std::vector<VolumeMount>& volumes,
                      const std::vector<std::pair<int,int>>& ports,
                      const std::string& container_id,
-                     DatabaseManager& db,
+                     StateStore& store,
                      const std::string& image_name,
                      bool vfs,
                      bool no_remove){
@@ -47,7 +45,7 @@ Container::Container(const std::string& container_name,
     m_image_name = image_name;
     m_vfs = vfs;
     m_no_remove = no_remove;
-    m_db = &db;
+    m_store = &store;
     m_container_id = container_id;
     m_container_name = container_name;
 }
@@ -187,40 +185,37 @@ void Container::manage_container(const std::string& path, const std::string& fil
             }
         }
 
-        std::string db_path{ Utils::get_base_dir() + "/quiver.db" };
-        DatabaseManager local_db{ db_path };
-        ContainerManager containerManager(local_db);
+        StateStore store{ Utils::get_base_dir() };
 
-        if(local_db.container_exists(m_container_id)){
-            if(!local_db.update_container_pid(m_container_id, m_child_pid)){
-                Utils::handle_error("Error: Unable to update container pid");
-            }
-            if(!local_db.update_container_status(m_container_id, "running")){
-                 std::cerr << "Warning: Could not update status to running\n";
+        if(store.container_exists(m_container_id)){
+            if(!store.update_container_status(m_container_id, "running", m_child_pid, Network::get_net_pid())){
+                std::cerr << "Warning: Could not update status to running\n";
             }
         }
         else{
-            if(!containerManager.create_container(m_container_id,
-                                                  m_child_pid,
-                                                  Network::get_net_pid(),
-                                                  m_container_name,
-                                                  m_new_fs,
-                                                  m_image_name,
-                                                  m_vfs,
-                                                  m_no_remove,
-                                                  m_vfs ? filesystem_dir : "")) {
-                Utils::handle_error("Unable to log container to database");
+            ContainerState cs{};
+            cs.id = m_container_id;
+            cs.name = m_container_name.empty() ? "quiver-" + m_container_id.substr(0, 12) : m_container_name;
+            cs.image = m_image_name;
+            cs.pid = m_child_pid;
+            cs.net_pid = Network::get_net_pid();
+            cs.status = "running";
+            cs.hostname = m_container_id.substr(0, 6);
+            cs.rootfs_path = m_new_fs;
+            cs.bundle_path = store.container_bundle_dir(m_container_id).string();
+            cs.command = m_commands.empty() ? std::vector<std::string>{"/bin/sh"} : m_commands;
+            cs.use_vfs = m_vfs;
+            cs.no_remove = m_no_remove;
+            cs.volumes = m_volumes;
+            for(const auto& p : m_forward_ports){
+                PortMapping pm{};
+                pm.host_port = p.first;
+                pm.container_port = p.second;
+                pm.protocol = "tcp";
+                cs.ports.push_back(pm);
             }
-
-            for(VolumeObject& volume : m_volumes){
-                volume.container_id = m_container_id;
-                if(!local_db.add_volume(volume)){
-                    Utils::handle_error("Unable to add volume " + volume.host_path + " to " + volume.container_path);
-                }
-            }
-
-            if (!local_db.create_ports(m_container_id, m_forward_ports)) {
-                Utils::handle_error("Unable to log port forwards to database");
+            if(!store.save_container(cs)){
+                Utils::handle_error("Unable to save container state");
             }
         }
 
@@ -229,10 +224,10 @@ void Container::manage_container(const std::string& path, const std::string& fil
         int status{};
         waitpid(m_child_pid, &status, 0);
 
-        if (!local_db.update_container_status(m_container_id, "exited")) {
+        if (!store.update_container_status(m_container_id, "exited")) {
             Utils::handle_error("Unable to update container status to EXITED");
         }
-        if(!m_no_remove && local_db.container_exists(m_container_id)){
+        if(!m_no_remove && store.container_exists(m_container_id)){
             if(Utils::remove_directory_recursively(filesystem_dir) == ERR){
                 Utils::handle_error("Unable to remove overlayfs dir");
             }
@@ -246,11 +241,12 @@ void Container::run(const std::string& path, const std::string& container_id) {
 
     std::string filesystem_dir{};
     pid_t temp_pid{ getpid() };
-    if(!m_db->container_exists(container_id)){
+    if(!m_store->container_exists(container_id)){
         filesystem_dir =  m_vfs ? Utils::get_vfs_path(temp_pid) : Utils::get_filesystem_path(temp_pid);
     }
     else{
-        filesystem_dir = m_vfs ? (m_no_remove ? m_db->get_container(container_id).vfs_path : Utils::get_vfs_path(temp_pid)) : Utils::get_filesystem_path(temp_pid);
+        auto cont = m_store->get_container(container_id);
+        filesystem_dir = m_vfs ? (m_no_remove && cont ? cont->bundle_path : Utils::get_vfs_path(temp_pid)) : Utils::get_filesystem_path(temp_pid);
     }
     if(!m_vfs){
         std::string upper { filesystem_dir + "/upper" };
@@ -290,9 +286,6 @@ void Container::run_container(const ContainerArgs& args) {
 
     if (sethostname(args.hostname.c_str(), args.hostname.size()) == ERR)
         Utils::handle_error("Unable to set hostname");
-
-    if (sethostname(args.hostname.c_str(), args.hostname.size()) == ERR)
-        Utils::handle_error("Unable to set hostname of container");
 
     std::string filesystem_path{ args.filesystem_dir };
     std::string final_filesystem{};
@@ -344,7 +337,7 @@ void Container::run_container(const ContainerArgs& args) {
         Utils::handle_error("Unable to change directory to " + final_filesystem);
     }
 
-    Mount::volumes(final_filesystem,m_volumes);
+    Mount::volumes(final_filesystem, m_volumes);
     std::cerr << "DEBUG: Creating old_root..." << '\n';
     Utils::ensure_dirs("old_root");
     std::cerr << "DEBUG: Performing pivot_root..." << '\n';
@@ -396,9 +389,6 @@ void Container::run_container(const ContainerArgs& args) {
         hosts << "10.0.2.100\t" << args.hostname << "\n";
 
         hosts.close();
-    }
-    if(PackageManager::initialize() == ERR) {
-        std::cerr << "Warning: Package manager initialization failed, but continuing..." << '\n';
     }
 
     clearenv();

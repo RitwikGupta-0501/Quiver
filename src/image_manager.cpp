@@ -9,8 +9,8 @@
 #include <fstream>
 #include <algorithm>
 
-ImageManager::ImageManager(DatabaseManager& db_manager)
-    : db_manager(db_manager) {
+ImageManager::ImageManager(StateStore& store)
+    : m_store(store) {
     const char* home_dir{ std::getenv("HOME") };
     if (home_dir != nullptr) {
         base_cache_path = std::string(home_dir) + "/.quiver/images";
@@ -41,9 +41,13 @@ bool ImageManager::pull(const std::string& image_name, std::string& out_path, st
         return false;
     }
 
-    if(!db_manager.image_exists(name, tag)){
-        if (!db_manager.add_image(name, tag, out_path)) {
-            error = "Failed to register image in database: " + image_name;
+    if(!m_store.get_image(name, tag).has_value()){
+        ImageMetadata meta;
+        meta.name = name;
+        meta.tag = tag;
+        meta.rootfs_path = out_path;
+        if (!m_store.register_image(meta)) {
+            error = "Failed to register image in state store: " + image_name;
             return false;
         }
     }

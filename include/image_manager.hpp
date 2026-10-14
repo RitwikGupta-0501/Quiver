@@ -7,13 +7,13 @@
 #include <map>
 #include <nlohmann/json.hpp>
 #include <cpr/cpr.h>
-#include "database_manager.hpp"
+#include "state_store.hpp"
 
 using json = nlohmann::json;
 
 class ImageManager {
     public:
-    explicit ImageManager(DatabaseManager& db_manager);
+    explicit ImageManager(StateStore& store);
     ~ImageManager();
 
     // Public API
@@ -21,7 +21,7 @@ class ImageManager {
     bool remove(const std::string& imageName, std::string& error);
 
     private:
-        DatabaseManager& db_manager;
+        StateStore& m_store;
         std::string base_cache_path;
 
         struct DownloadProgress {

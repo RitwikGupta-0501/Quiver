@@ -2,6 +2,7 @@
 /bin/**
 /gen_schemas/**
 *.txt
+!CMakeLists.txt
 
 .vscode/**
 *.code-workspace
