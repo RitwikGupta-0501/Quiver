@@ -1,6 +1,5 @@
 #include "../include/image_manager.hpp"
-#include "../include/database_manager.hpp"
-#include "../include/container_management.hpp"
+#include "../include/state_store.hpp"
 #include "../include/utils.hpp"
 #include "../include/command_line_handler.hpp"
 #include <cstdlib>
@@ -10,22 +9,14 @@
 #include <map>
 #include <vector>
 
-using CommandHandler = std::function<void(DatabaseManager&, ImageManager&, const std::vector<std::string>&)>;
+using CommandHandler = std::function<void(StateStore&, ImageManager&, const std::vector<std::string>&)>;
 
 int main(int argc, char* argv[]) {
     try {
         std::string base_dir{ Utils::get_base_dir() };
-        Utils::ensure_dirs(base_dir);
+        StateStore store{ base_dir };
 
-        std::string db_path{ base_dir + "/quiver.db" };
-        DatabaseManager db{ db_path };
-        if (!db.init_db()) [[unlikely]] {
-            std::cerr << "Failed to initialize the database. Exiting." << '\n';
-            return EXIT_FAILURE;
-        }
-
-        ImageManager img_manager(db);
-        ContainerManager containerManager(db);
+        ImageManager img_manager(store);
 
         if (argc < 2) {
             Utils::print_usage();
@@ -33,43 +24,43 @@ int main(int argc, char* argv[]) {
         }
 
         std::map<std::string, CommandHandler> commands{};
-        commands["run"]    = [](DatabaseManager& db[[maybe_unused]],
+        commands["run"]    = [](StateStore& store[[maybe_unused]],
                                 ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::run(db, args); };
-        commands["attach"] = [](DatabaseManager& db[[maybe_unused]],
+                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::run(store, args); };
+        commands["attach"] = [](StateStore& store[[maybe_unused]],
                                 ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::attach(db, args); };
-        commands["ps"]     = [](DatabaseManager& db[[maybe_unused]],
+                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::attach(store, args); };
+        commands["ps"]     = [](StateStore& store[[maybe_unused]],
                                 ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::ps(db, args); };
-        commands["rm"]     = [](DatabaseManager& db[[maybe_unused]],
+                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::ps(store, args); };
+        commands["rm"]     = [](StateStore& store[[maybe_unused]],
                                 ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::rm(db, args); };
-        commands["start"]  = [](DatabaseManager& db[[maybe_unused]],
+                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::rm(store, args); };
+        commands["start"]  = [](StateStore& store[[maybe_unused]],
                                 ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::start(db, args); };
-        commands["stop"]   = [](DatabaseManager& db[[maybe_unused]],
+                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::start(store, args); };
+        commands["stop"]   = [](StateStore& store[[maybe_unused]],
                                 ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::stop(db, args); };
-        commands["image"]  = [](DatabaseManager& db[[maybe_unused]],
+                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::stop(store, args); };
+        commands["image"]  = [](StateStore& store[[maybe_unused]],
                                 ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::image(db, img, args); };
-        commands["volume"] = [](DatabaseManager& db[[maybe_unused]],
+                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::image(store, img, args); };
+        commands["volume"] = [](StateStore& store[[maybe_unused]],
                                 ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::volume(db, args); };
-        commands["network"] = [](DatabaseManager& db[[maybe_unused]],
+                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::volume(store, args); };
+        commands["network"] = [](StateStore& store[[maybe_unused]],
                                 ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::network(db, args); };
-        commands["create"] = [](DatabaseManager& db[[maybe_unused]],
+                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::network(store, args); };
+        commands["create"] = [](StateStore& store[[maybe_unused]],
                                 ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::create(db, args); };
-        commands["pull"]   = [](DatabaseManager& db[[maybe_unused]],
+                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::create(store, args); };
+        commands["pull"]   = [](StateStore& store[[maybe_unused]],
                                 ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::pull(db, args); };
-        commands["vfs"]   = [](DatabaseManager& db[[maybe_unused]],
+                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::pull(store, args); };
+        commands["vfs"]    = [](StateStore& store[[maybe_unused]],
                                 ImageManager& img[[maybe_unused]],
-                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::vfs(db, args); };
-        commands["help"]   = [](DatabaseManager& db[[maybe_unused]],
+                                const std::vector<std::string>& args[[maybe_unused]]){ CommandLineHandler::vfs(store, args); };
+        commands["help"]   = [](StateStore& store[[maybe_unused]],
                                 ImageManager& img[[maybe_unused]],
                                 const std::vector<std::string>& args[[maybe_unused]]){ Utils::print_usage(); };
 
@@ -83,11 +74,11 @@ int main(int argc, char* argv[]) {
             Utils::print_usage();
             return EXIT_FAILURE;
         } else {
-            it->second(db, img_manager, cmds);
+            it->second(store, img_manager, cmds);
         }
         return EXIT_SUCCESS;
-    } catch (const std::runtime_error& e) {
-        std::cerr << "Database Error: " << e.what() << '\n';
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << '\n';
         return EXIT_FAILURE;
     }
 }

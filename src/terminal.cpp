@@ -1,7 +1,6 @@
 #include "../include/terminal.hpp"
 #include "../include/utils.hpp"
 #include "../include/network.hpp"
-#include "../include/database_manager.hpp"
 #include "../include/container.hpp"
 #include <cstdlib>
 #include <pty.h>
@@ -15,7 +14,6 @@
 #include <cstring>
 #include <fcntl.h>
 
-DatabaseManager db{ Utils::get_base_dir() + "quiver.db" };
 int Terminal::m_sfd{-1};
 std::string Terminal::m_container_id{""};
 termios Terminal::m_orig_term{};

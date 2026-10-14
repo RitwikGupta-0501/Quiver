@@ -195,7 +195,7 @@ bool Utils::extract_tarball(const std::string& tarball_path, const std::string& 
         return false;
     }
     else if (pid == 0) {
-        execlp("tar", "tar", "-xzf", tarball_path.c_str(), "-", destination_path.c_str(), NULL);
+        execlp("tar", "tar", "-xzf", tarball_path.c_str(), "-C", destination_path.c_str(), NULL);
         perror("execlp failed");
         exit(ERR);
     }
