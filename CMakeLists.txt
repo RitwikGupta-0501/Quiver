@@ -89,3 +89,21 @@ target_link_libraries(quiver PRIVATE
     util
     dl
 )
+
+enable_testing()
+
+add_executable(quiver_cgroup_tests
+    tests/test_cgroup.cpp
+    src/cgroup.cpp
+    src/state_store.cpp
+    src/utils.cpp
+    src/monitor.cpp
+)
+target_include_directories(quiver_cgroup_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(quiver_cgroup_tests PRIVATE
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+)
+add_test(NAME CgroupTests COMMAND quiver_cgroup_tests)
