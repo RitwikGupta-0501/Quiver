@@ -117,9 +117,15 @@ bool StateStore::update_container_status(std::string_view id, std::string_view s
 bool StateStore::remove_container(std::string_view id_or_name) const {
     auto opt = get_container(id_or_name);
     if (!opt) return false;
+    fs::path p = container_bundle_dir(opt->id);
     std::error_code ec;
-    fs::remove_all(container_bundle_dir(opt->id), ec);
-    return !ec;
+    fs::remove_all(p, ec);
+    if (ec) {
+        if (Utils::remove_directory_recursively(p.string()) != 0) {
+            return false;
+        }
+    }
+    return true;
 }
 
 std::vector<ContainerState> StateStore::list_containers(bool only_running) const {

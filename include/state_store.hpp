@@ -66,9 +66,14 @@ struct ImageMetadata {
     std::string rootfs_path{};
     std::string created_at{};
     std::vector<std::string> default_env{};
+    std::vector<std::string> default_entrypoint{};
     std::vector<std::string> default_cmd{"/bin/sh"};
+    std::string working_dir{"/"};
 
-    NLOHMANN_DEFINE_TYPE_INTRUSIVE(ImageMetadata, name, tag, rootfs_path, created_at, default_env, default_cmd)
+    NLOHMANN_DEFINE_TYPE_INTRUSIVE_WITH_DEFAULT(
+        ImageMetadata, name, tag, rootfs_path, created_at,
+        default_env, default_entrypoint, default_cmd, working_dir
+    )
 };
 
 class StateStore {

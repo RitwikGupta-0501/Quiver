@@ -1,42 +1,37 @@
 #pragma once
-#include <sys/stat.h>
-#include <fstream>
-#include <fcntl.h>
-#include <unistd.h>
+#include <sys/types.h>
 #include <vector>
-#include <map>
+#include <utility>
 #include <string>
+#include "state_store.hpp"
 
 class Network {
-    public:
-        Network() = default;
+public:
+    Network() = default;
+    ~Network();
 
-        static int setup_networking(const pid_t& pid);
-        static int setup_networking_with_ports(const pid_t& pid, const std::vector<std::pair<int, int>>& port_forwards);
+    Network(const Network&) = delete;
+    Network& operator=(const Network&) = delete;
+    Network(Network&& other) noexcept;
+    Network& operator=(Network&& other) noexcept;
 
-        static int forward_port(const int& host_port, const int& container_port);
-        static int add_port_forward(const pid_t& container_pid, int host_port, int container_port);
-        static int remove_port_forward(const pid_t& container_pid, int host_port);
-        static int connect_namespaces(const pid_t& target_pid, int host_port, int target_port);
+    int setup(pid_t container_pid, const std::vector<PortMapping>& ports);
+    void teardown();
 
-        static pid_t get_net_pid() { return m_net_pid; }
-        static std::string get_api_socket_path(const pid_t& container_pid);
-        static bool is_running();
+    [[nodiscard]] pid_t get_net_pid() const noexcept { return m_slirp_pid; }
+    [[nodiscard]] const std::string& get_api_socket() const noexcept { return m_api_socket; }
 
-        static int send_api_command(const pid_t& container_pid, const std::string& json_command);
+    // Stateless RPC helpers for CLI commands (`quiver network add/rm`)
+    static int add_port_forward(pid_t container_pid, int host_port, int container_port);
+    static int remove_port_forward(pid_t container_pid, int host_port);
+    static int connect_namespaces(pid_t target_pid, int host_port, int target_port);
+    static std::string get_api_socket_path(pid_t container_pid);
 
-        static int cleanup_networking(const pid_t& container_pid);
-        ~Network();
+private:
+    static int send_api_command(pid_t container_pid, const std::string& json_command);
+    static int wait_for_api_socket(const std::string& socket_path, int timeout_ms = 5000);
 
-    private:
-        struct NetworkConfig {
-            pid_t slirp_pid;
-            std::vector<std::pair<int, int>> port_forwards;
-            std::string api_socket;
-        };
-
-        static pid_t m_net_pid;
-        static bool m_running;
-        static std::map<pid_t, NetworkConfig> m_container_networks;
-        static int wait_for_api_socket(const std::string& socket_path, int timeout_ms = 5000);
+    pid_t m_container_pid{-1};
+    pid_t m_slirp_pid{-1};
+    std::string m_api_socket{};
 };

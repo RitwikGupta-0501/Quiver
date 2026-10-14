@@ -18,4 +18,5 @@ namespace Mount{
     void bind_mount(const std::string& src, const std::string& dst, const std::string& options = "");
     void bind_rec_mount(const std::string& src, const std::string& dst, const std::string& options = "");
     void volumes(const std::string& rootfs, const std::vector<VolumeMount>& volumes, const std::string& options = "");
+    void overlay(const fs::path& lower_dir, const fs::path& upper_dir, const fs::path& work_dir, const fs::path& merged_dir);
 }

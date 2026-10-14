@@ -11,7 +11,14 @@
   - Fix `setup_user_namespace()` to target `/proc/<child_pid>/uid_map` and `/proc/<child_pid>/gid_map` using dynamic host `getuid()` / `getgid()`.
   - Add `,userxattr` to `Mount::overlay()` so rootless OverlayFS works natively without requiring full rootfs copies.
   - Fix `Utils::extract_tarball()` (`-C` flag and `--no-same-owner`)[cite: 1].
-- [ ] **Arbitrary Command Execution & OCI Config Support:** Support `quiver run -i <image> <cmd> [args...]` via `execvp()` and parse default `Env` and `Cmd` fields from registry image manifests.
+- [ ] **Arbitrary Command Execution & OCI Image Spec (v1.1.1) Compliance:**
+  - Support `quiver run -i <image> <cmd> [args...]` via `execvp()`, falling back to image default entrypoint/cmd or `/bin/sh`.
+  - Fetch and parse OCI Image Config (`application/vnd.oci.image.config.v1+json`) to extract native `Env`, `Cmd`, `Entrypoint`, and `WorkingDir`.
+  - Update manifest retrieval `Accept` headers to include `application/vnd.oci.image.manifest.v1+json`.
+  - Implement SHA-256 digest and payload size verification for all downloaded layer and config blobs before extraction.
+  - Dynamically inspect `layer.mediaType` to support uncompressed (`.tar`), gzip (`.tar+gzip`), and zstd (`.tar+zstd`) archives.
+  - Dynamic host platform resolution (`uname -m` / `sys/utsname.h`) matching both `platform.architecture` and `platform.os == "linux"` instead of hardcoding `amd64`.
+  - Handle OCI layer changeset semantics and whiteout markers (`.wh.<file>` and `.wh..wh..opq`).
 - [ ] **Integrate Async `Monitor` Logging:** Route daemon and container lifecycle logs through `Monitor` (`src/monitor.cpp`)[cite: 1] into `~/.quiver/logs/<container_id>.log`.
 
 ## Phase 3: Cgroup v2 Hardware Resource Throttling

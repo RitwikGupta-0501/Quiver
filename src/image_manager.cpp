@@ -37,19 +37,20 @@ bool ImageManager::pull(const std::string& image_name, std::string& out_path, st
         return false;
     }
 
-    if (!get_image(image_name, out_path, error)) {
+    ImageMetadata meta;
+    meta.name = name;
+    meta.tag = tag;
+
+    if (!get_image(image_name, out_path, meta, error)) {
         return false;
     }
 
-    if(!m_store.get_image(name, tag).has_value()){
-        ImageMetadata meta;
-        meta.name = name;
-        meta.tag = tag;
-        meta.rootfs_path = out_path;
-        if (!m_store.register_image(meta)) {
-            error = "Failed to register image in state store: " + image_name;
-            return false;
-        }
+    meta.name = name;
+    meta.tag = tag;
+    meta.rootfs_path = out_path;
+    if (!m_store.register_image(meta)) {
+        error = "Failed to register image in state store: " + image_name;
+        return false;
     }
     return true;
 }
@@ -73,15 +74,19 @@ bool ImageManager::remove(const std::string& image_name, std::string& error) {
     return true;
 }
 
-bool ImageManager::get_image(const std::string& image_name, std::string& out_path, std::string& error) {
+bool ImageManager::get_image(const std::string& image_name, std::string& out_path, ImageMetadata& out_meta, std::string& error) {
     out_path = get_image_path(image_name);
     if (Utils::path_exists(out_path)) {
         std::cout << "Image found in local storage." << '\n';
+        auto existing = m_store.get_image(out_meta.name, out_meta.tag);
+        if (existing.has_value()) {
+            out_meta = *existing;
+        }
         return true;
     }
 
     std::cout << "Image not in local storage. Pulling from registry..." << '\n';
-    if (!pull_image_from_registry(image_name, out_path, error)) {
+    if (!pull_image_from_registry(image_name, out_path, out_meta, error)) {
         if (Utils::path_exists(out_path)) {
             if(Utils::remove_directory_recursively(out_path) == ERR){
                 Utils::handle_error("Unable to remove "+out_path);
@@ -93,7 +98,7 @@ bool ImageManager::get_image(const std::string& image_name, std::string& out_pat
     return true;
 }
 
-bool ImageManager::pull_image_from_registry(const std::string& image_name, const std::string& image_path, std::string& error) {
+bool ImageManager::pull_image_from_registry(const std::string& image_name, const std::string& image_path, ImageMetadata& out_meta, std::string& error) {
     std::string repo, tag;
     size_t colon_pos = image_name.find(':');
     repo = (colon_pos != std::string::npos) ? image_name.substr(0, colon_pos) : image_name;
@@ -106,16 +111,22 @@ bool ImageManager::pull_image_from_registry(const std::string& image_name, const
     json manifest;
     if (!get_manifest(image_name, token, manifest, error)) return false;
 
-    if (manifest.contains("manifests")) {
+    const std::string host_arch = Utils::get_host_oci_arch();
+    if (manifest.contains("manifests") && manifest["manifests"].is_array()) {
         std::string arch_digest;
         for (const auto& entry : manifest["manifests"]) {
-            if (entry.contains("platform") && entry["platform"]["architecture"] == "amd64") {
-                arch_digest = entry["digest"];
-                break;
+            if (entry.contains("platform")) {
+                const auto& plat = entry["platform"];
+                std::string arch = plat.value("architecture", "");
+                std::string os   = plat.value("os", "");
+                if (arch == host_arch && os == "linux") {
+                    arch_digest = entry.value("digest", "");
+                    break;
+                }
             }
         }
         if (arch_digest.empty()) {
-            error = "Could not find an 'amd64' manifest.";
+            error = "No matching linux/" + host_arch + " manifest found in image index.";
             return false;
         }
 
@@ -123,7 +134,114 @@ bool ImageManager::pull_image_from_registry(const std::string& image_name, const
         if (!get_manifest(arch_image_name, token, manifest, error)) return false;
     }
 
+    if (!fetch_and_parse_config(manifest, repo, token, out_meta, error)) {
+        return false;
+    }
+
     return download_and_extract_layers(manifest, repo, token, image_path, error);
+}
+
+bool ImageManager::fetch_and_parse_config(
+    const json& manifest,
+    const std::string& repo,
+    const std::string& token,
+    ImageMetadata& out_meta,
+    std::string& error
+) {
+    if (!manifest.contains("config") || !manifest["config"].is_object()) {
+        error = "Manifest missing config object.";
+        return false;
+    }
+    std::string config_digest = manifest["config"].value("digest", "");
+    std::uintmax_t config_size = manifest["config"].value("size", 0ULL);
+    if (config_digest.empty()) {
+        error = "Config descriptor missing digest.";
+        return false;
+    }
+
+    fs::path tmp_config_path = fs::path(base_cache_path) / "config.json.tmp";
+    Utils::ensure_dirs(tmp_config_path.parent_path());
+
+    std::ofstream out_file(tmp_config_path, std::ios::binary);
+    if (!out_file) {
+        error = "Failed to open temporary file for config: " + tmp_config_path.string();
+        return false;
+    }
+
+    std::string url = "https://registry-1.docker.io/v2/" + repo + "/blobs/" + config_digest;
+    cpr::Response r = cpr::Download(out_file,
+                                    cpr::Url{url},
+                                    cpr::Header{{"Authorization", "Bearer " + token}});
+    out_file.close();
+
+    if (r.status_code != 200 && r.status_code != 307) {
+        std::error_code ec;
+        fs::remove(tmp_config_path, ec);
+        error = "Failed to download image config. HTTP status: " + std::to_string(r.status_code);
+        return false;
+    }
+
+    if (!Utils::verify_sha256_and_size(tmp_config_path, config_digest, config_size)) {
+        std::error_code ec;
+        fs::remove(tmp_config_path, ec);
+        error = "Config blob integrity check failed for " + config_digest;
+        return false;
+    }
+
+    std::ifstream in_file(tmp_config_path);
+    if (!in_file) {
+        std::error_code ec;
+        fs::remove(tmp_config_path, ec);
+        error = "Failed to open config JSON file.";
+        return false;
+    }
+
+    json config_json;
+    try {
+        in_file >> config_json;
+    } catch (const std::exception& e) {
+        std::error_code ec;
+        fs::remove(tmp_config_path, ec);
+        error = "Failed to parse config JSON: " + std::string(e.what());
+        return false;
+    }
+    in_file.close();
+    std::error_code ec;
+    fs::remove(tmp_config_path, ec);
+
+    json cfg = config_json.value("config", json::object());
+    if (cfg.contains("Env") && cfg["Env"].is_array()) {
+        out_meta.default_env.clear();
+        for (const auto& env_item : cfg["Env"]) {
+            if (env_item.is_string()) {
+                out_meta.default_env.push_back(env_item.get<std::string>());
+            }
+        }
+    }
+    if (cfg.contains("Entrypoint") && cfg["Entrypoint"].is_array()) {
+        out_meta.default_entrypoint.clear();
+        for (const auto& ep : cfg["Entrypoint"]) {
+            if (ep.is_string()) {
+                out_meta.default_entrypoint.push_back(ep.get<std::string>());
+            }
+        }
+    }
+    if (cfg.contains("Cmd") && cfg["Cmd"].is_array()) {
+        out_meta.default_cmd.clear();
+        for (const auto& cmd_item : cfg["Cmd"]) {
+            if (cmd_item.is_string()) {
+                out_meta.default_cmd.push_back(cmd_item.get<std::string>());
+            }
+        }
+    }
+    if (cfg.contains("WorkingDir") && cfg["WorkingDir"].is_string()) {
+        std::string wd = cfg["WorkingDir"].get<std::string>();
+        if (!wd.empty()) {
+            out_meta.working_dir = wd;
+        }
+    }
+
+    return true;
 }
 
 bool ImageManager::get_manifest(const std::string& image_name, const std::string& token, json& out_manifest, std::string& error) {
@@ -142,7 +260,11 @@ bool ImageManager::get_manifest(const std::string& image_name, const std::string
     cpr::Url manifest_url{"https://registry-1.docker.io/v2/" + repo + "/manifests/" + reference};
     cpr::Response r = cpr::Get(manifest_url, cpr::Header{
         {"Authorization", "Bearer " + token},
-        {"Accept", "application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json"}
+        {"Accept",
+         "application/vnd.oci.image.manifest.v1+json, "
+         "application/vnd.oci.image.index.v1+json, "
+         "application/vnd.docker.distribution.manifest.v2+json, "
+         "application/vnd.docker.distribution.manifest.list.v2+json"}
     });
     if (r.status_code != 200) {
         error = "Failed to get manifest: " + std::to_string(r.status_code) + " " + r.reason;
@@ -269,12 +391,90 @@ void ImageManager::print_progress() {
     std::cout << '\n'; // Clean up with a final newline after the loop finishes.
 }
 
-bool ImageManager::extract_layer(const std::string& tarball_path, const std::string& destination_path, std::string& error) {
-    if(!Utils::extract_tarball(tarball_path, destination_path)){
-        error = "Unable to extract layer " + tarball_path;
+bool ImageManager::apply_layer_with_whiteouts(
+    const fs::path& tarball_path,
+    const fs::path& destination_path,
+    size_t layer_index,
+    Utils::ArchiveCompression compression,
+    std::string& error
+) {
+    fs::path staging_dir = destination_path.parent_path() / (".layer_staging_" + std::to_string(layer_index));
+    std::error_code ec;
+    fs::remove_all(staging_dir, ec);
+    Utils::ensure_dirs(staging_dir);
+
+    if (!Utils::extract_tarball(tarball_path, staging_dir, compression)) {
+        fs::remove_all(staging_dir, ec);
+        error = "Failed to extract layer tarball into staging directory: " + tarball_path.string();
         return false;
     }
+
+    // First Pass: Opaque Whiteouts (.wh..wh..opq)
+    std::vector<fs::path> opaque_whiteouts;
+    for (auto it = fs::recursive_directory_iterator(staging_dir, fs::directory_options::skip_permission_denied);
+         it != fs::recursive_directory_iterator(); ++it) {
+        if (it->is_regular_file() && it->path().filename() == ".wh..wh..opq") {
+            opaque_whiteouts.push_back(it->path());
+        }
+    }
+    for (const auto& opq_path : opaque_whiteouts) {
+        fs::path rel_parent = fs::relative(opq_path.parent_path(), staging_dir);
+        fs::path target_parent = (rel_parent == ".") ? destination_path : (destination_path / rel_parent);
+        if (fs::exists(target_parent) && fs::is_directory(target_parent)) {
+            for (const auto& entry : fs::directory_iterator(target_parent, fs::directory_options::skip_permission_denied)) {
+                fs::remove_all(entry.path(), ec);
+            }
+        }
+        fs::remove(opq_path, ec);
+    }
+
+    // Second Pass: Explicit Whiteouts (.wh.<filename>)
+    std::vector<fs::path> explicit_whiteouts;
+    for (auto it = fs::recursive_directory_iterator(staging_dir, fs::directory_options::skip_permission_denied);
+         it != fs::recursive_directory_iterator(); ++it) {
+        std::string filename = it->path().filename().string();
+        if (filename.starts_with(".wh.") && filename != ".wh..wh..opq") {
+            explicit_whiteouts.push_back(it->path());
+        }
+    }
+    for (const auto& wh_path : explicit_whiteouts) {
+        std::string filename = wh_path.filename().string();
+        std::string target_name = filename.substr(4);
+        fs::path rel_parent = fs::relative(wh_path.parent_path(), staging_dir);
+        fs::path target_item = (rel_parent == ".") ? (destination_path / target_name) : (destination_path / rel_parent / target_name);
+        fs::remove_all(target_item, ec);
+        fs::remove(wh_path, ec);
+    }
+
+    // Third Pass: Merge remaining files and directories
+    std::vector<fs::path> dirs_to_create;
+    std::vector<fs::path> items_to_copy;
+    for (auto it = fs::recursive_directory_iterator(staging_dir, fs::directory_options::skip_permission_denied);
+         it != fs::recursive_directory_iterator(); ++it) {
+        if (it->is_directory()) {
+            dirs_to_create.push_back(it->path());
+        } else {
+            items_to_copy.push_back(it->path());
+        }
+    }
+    for (const auto& d : dirs_to_create) {
+        fs::path rel = fs::relative(d, staging_dir);
+        Utils::ensure_dirs(destination_path / rel);
+    }
+    for (const auto& item : items_to_copy) {
+        fs::path rel = fs::relative(item, staging_dir);
+        fs::path dest = destination_path / rel;
+        Utils::ensure_dirs(dest.parent_path());
+        fs::remove_all(dest, ec);
+        fs::copy(item, dest, fs::copy_options::copy_symlinks | fs::copy_options::overwrite_existing, ec);
+    }
+
+    fs::remove_all(staging_dir, ec);
     return true;
+}
+
+bool ImageManager::extract_layer(const std::string& tarball_path, const std::string& destination_path, std::string& error) {
+    return apply_layer_with_whiteouts(tarball_path, destination_path, 0, Utils::ArchiveCompression::Auto, error);
 }
 
 bool ImageManager::download_and_extract_layers(const json& manifest, const std::string& repo, const std::string& token, const std::string& destination_path, std::string& error) {
@@ -286,17 +486,24 @@ bool ImageManager::download_and_extract_layers(const json& manifest, const std::
     }
 
     std::vector<std::string> digests;
+    std::vector<std::uintmax_t> sizes;
+    std::vector<std::string> media_types;
     for (const auto& layer : manifest["layers"]) {
-        digests.push_back(layer["digest"]);
-        m_download_progress[layer["digest"].get<std::string>()] = {0, 0};
+        std::string d = layer["digest"].get<std::string>();
+        digests.push_back(d);
+        sizes.push_back(layer.value("size", 0ULL));
+        media_types.push_back(layer.value("mediaType", ""));
+        m_download_progress[d] = {0, 0};
     }
 
     std::vector<std::future<std::string>> download_futures;
     std::vector<std::string> tarball_paths;
 
-    for (const auto& digest : digests) {
+    for (size_t i = 0; i < digests.size(); ++i) {
+        const auto& digest = digests[i];
         std::string url = "https://registry-1.docker.io/v2/" + repo + "/blobs/" + digest;
-        std::string path = destination_path + "/" + digest.substr(7) + ".tar.gz";
+        std::string raw_digest = (digest.starts_with("sha256:")) ? digest.substr(7) : digest;
+        std::string path = destination_path + "/.layer_" + raw_digest + ".tar";
         tarball_paths.push_back(path);
         download_futures.push_back(download_layer_async(url, token, path, digest));
     }
@@ -308,19 +515,50 @@ bool ImageManager::download_and_extract_layers(const json& manifest, const std::
         if (!download_error.empty()) {
             error = download_error;
             progress_thread.join();
+            for (const auto& p : tarball_paths) {
+                std::error_code ec;
+                fs::remove(p, ec);
+            }
             return false;
         }
     }
 
     progress_thread.join();
 
-    std::cout << "Download complete. Now extracting layers..." << '\n';
+    std::cout << "Download complete. Verifying layer digests..." << '\n';
     for (size_t i = 0; i < digests.size(); ++i) {
-        std::cout << "  -> Extracting layer " << i+1 << "/" << digests.size() << " (" << digests[i].substr(0, 12) << ")" << '\n';
-        if (!extract_layer(tarball_paths[i], destination_path, error)) {
+        if (!Utils::verify_sha256_and_size(tarball_paths[i], digests[i], sizes[i])) {
+            error = "Layer digest or size verification failed for " + digests[i];
+            for (const auto& p : tarball_paths) {
+                std::error_code ec;
+                fs::remove(p, ec);
+            }
             return false;
         }
-        std::remove(tarball_paths[i].c_str());
+    }
+
+    std::cout << "Layers verified. Now extracting layers with whiteout processing..." << '\n';
+    for (size_t i = 0; i < digests.size(); ++i) {
+        std::cout << "  -> Extracting layer " << i+1 << "/" << digests.size() << " (" << digests[i].substr(0, 12) << ")" << '\n';
+        Utils::ArchiveCompression comp = Utils::ArchiveCompression::Auto;
+        const auto& mt = media_types[i];
+        if (mt.ends_with("+gzip") || mt.ends_with(".gzip")) {
+            comp = Utils::ArchiveCompression::Gzip;
+        } else if (mt.ends_with("+zstd") || mt.ends_with(".zstd")) {
+            comp = Utils::ArchiveCompression::Zstd;
+        } else if (mt.ends_with(".tar")) {
+            comp = Utils::ArchiveCompression::Uncompressed;
+        }
+
+        if (!apply_layer_with_whiteouts(tarball_paths[i], destination_path, i, comp, error)) {
+            for (const auto& p : tarball_paths) {
+                std::error_code ec;
+                fs::remove(p, ec);
+            }
+            return false;
+        }
+        std::error_code ec;
+        fs::remove(tarball_paths[i], ec);
     }
     std::cout << "Image pull and extraction complete." << '\n';
     return true;
