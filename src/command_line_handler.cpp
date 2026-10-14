@@ -85,6 +85,42 @@ void CommandLineHandler::run(const std::vector<std::string>& cmds) {
             spec.use_vfs = true;
         } else if (arg == "--no-remove") {
             spec.no_remove = true;
+        } else if (arg == "-m" || arg == "--memory") {
+            if (i + 1 < cmds.size()) {
+                try {
+                    spec.resources.memory_max_bytes = Utils::parse_memory_string(cmds[++i]);
+                } catch (const std::exception& e) {
+                    std::cerr << "Error: Invalid --memory value: " << e.what() << '\n';
+                    return;
+                }
+            } else {
+                std::cerr << "Error: " << arg << " requires an argument\n";
+                return;
+            }
+        } else if (arg == "--cpus") {
+            if (i + 1 < cmds.size()) {
+                try {
+                    spec.resources.cpus = Utils::parse_cpus_string(cmds[++i]);
+                } catch (const std::exception& e) {
+                    std::cerr << "Error: Invalid --cpus value: " << e.what() << '\n';
+                    return;
+                }
+            } else {
+                std::cerr << "Error: --cpus requires an argument\n";
+                return;
+            }
+        } else if (arg == "--pids-limit") {
+            if (i + 1 < cmds.size()) {
+                try {
+                    spec.resources.pids_max = Utils::parse_pids_limit(cmds[++i]);
+                } catch (const std::exception& e) {
+                    std::cerr << "Error: Invalid --pids-limit value: " << e.what() << '\n';
+                    return;
+                }
+            } else {
+                std::cerr << "Error: --pids-limit requires an argument\n";
+                return;
+            }
         } else if (arg == "-i" || arg == "--image") {
             if (i + 1 < cmds.size()) {
                 spec.image = cmds[++i];
