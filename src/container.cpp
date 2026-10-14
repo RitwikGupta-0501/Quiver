@@ -4,6 +4,7 @@
 #include "../include/mount.hpp"
 #include "../include/device_manager.hpp"
 #include "../include/monitor.hpp"
+#include "../include/cgroup.hpp"
 #include <cstdlib>
 #include <iostream>
 #include <fstream>
@@ -158,15 +159,29 @@ void Container::manage_container(const fs::path& filesystem_dir) {
 
         setup_user_namespace(m_child_pid, host_uid, host_gid);
 
+        // Phase 3: Setup Cgroup v2 limits and enroll m_child_pid BEFORE waking child
+        CgroupManager cgroup(m_spec.id, m_spec.resources);
+        std::string cg_err;
+        if (cgroup.setup(cg_err)) {
+            if (!cgroup.assign_pid(m_child_pid, cg_err)) {
+                Monitor::get_instance().log("WARN", "Cgroup", "Failed to assign PID " + std::to_string(m_child_pid) + " to cgroup: " + cg_err);
+            } else {
+                Monitor::get_instance().log("INFO", "Cgroup", "Applied cgroup v2 limits at " + cgroup.cgroup_path().string());
+            }
+        } else {
+            Monitor::get_instance().log("WARN", "Cgroup", "Cgroup v2 delegation unavailable (continuing unthrottled): " + cg_err);
+        }
+
+        if (m_network.setup(m_child_pid, m_spec.ports) != 0) {
+            Monitor::get_instance().log("ERROR", "Network", "Failed to setup networking for PID " + std::to_string(m_child_pid));
+        }
+
+        // Now release m_child_pid to fork container_init inside the configured cgroup & network namespace
         char go_signal = '1';
         if (write(parent_to_child_pipe[1], &go_signal, 1) != 1) {
             Utils::handle_error("Failed to write sync to child");
         }
         close(parent_to_child_pipe[1]);
-
-        if (m_network.setup(m_child_pid, m_spec.ports) != 0) {
-            Monitor::get_instance().log("ERROR", "Network", "Failed to setup networking for PID " + std::to_string(m_child_pid));
-        }
 
         ContainerState cs{};
         cs.id = m_spec.id;
@@ -196,6 +211,7 @@ void Container::manage_container(const fs::path& filesystem_dir) {
 
         m_store.update_container_status(m_spec.id, "exited");
         m_network.teardown();
+        cgroup.cleanup();
 
         if (!m_spec.no_remove) {
             std::error_code ec;
