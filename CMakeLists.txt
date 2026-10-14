@@ -165,5 +165,12 @@ target_link_libraries(quiver_concurrency_tests PRIVATE
 )
 add_test(NAME ConcurrencyStressTests COMMAND quiver_concurrency_tests)
 
+# Phase 5.4: Custom CUDA Driver API Matrix Benchmark Binary (Zero nvcc dependency)
+add_executable(cuda_matrix_bench
+    benchmarks/cuda_matrix_bench.cpp
+)
+target_link_libraries(cuda_matrix_bench PRIVATE dl Threads::Threads)
+
+
 
 
