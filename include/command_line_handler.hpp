@@ -21,6 +21,7 @@ public:
     void start(const std::vector<std::string>& args);
     void stop(const std::vector<std::string>& args);
     void vfs(const std::vector<std::string>& args);
+    void stats(const std::vector<std::string>& args);
 
 private:
     StateStore& m_store;

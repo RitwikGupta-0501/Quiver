@@ -148,6 +148,7 @@ std::cout << "Usage: quiver <command> [options] [arguments]\n\n"
               << "      -m, --memory <limit>         Memory limit (e.g., 512m, 2g)\n"
               << "      --cpus <quota>               Number of CPUs (e.g., 0.5, 2.0)\n"
               << "      --pids-limit <max>           Tune container pids limit (default: 512)\n"
+              << "      --gpus <all|0,1,...>         Expose host GPUs to container\n"
               << "      --vfs                        Use VFS (copy) instead of OverlayFS for package manager related\n"
               << "      --no-remove                  Do not remove the filesystem after exit\n\n"
 
@@ -158,6 +159,8 @@ std::cout << "Usage: quiver <command> [options] [arguments]\n\n"
 
               << "  ps [-a]                          List containers\n"
               << "      -a                           Show all containers (default shows just running)\n\n"
+
+              << "  stats [--no-stream] [cid...]     Display live container resource & GPU usage statistics\n\n"
 
               << "  pull <image_name>                Pull an image from a registry\n\n"
               << "  image <subcommand>               Manage images\n"
@@ -174,9 +177,10 @@ std::cout << "Usage: quiver <command> [options] [arguments]\n\n"
               << "      rm <network_id> ...          remove one or more network links\n"
               << "      add <container_id> [args]                                    \n"
               << "              <host:cont> ...      add a new network link\n\n"
-              << "  create <subcommand>              Create resources\n"
-              << "      volume <container_id> [args]                 \n"
-              << "                  <host:cont> ...  Create a volume link for container\n\n"
+              << "  create [options] -i <image> [cmd] Create a container without starting it\n"
+              << "      --gpus <all|0,1,...>         Expose host GPUs to container\n"
+              << "  create gpu <container_id> <all|0,1,...> Configure GPU access for a container\n"
+              << "  create volume <container_id> <host:cont> ... Create a volume link for container\n\n"
               << "  vfs rm <container_id>            remove vfs for a container\n\n"
               << "  help                             Show this help message\n";
 }
@@ -502,3 +506,69 @@ auto Utils::parse_pids_limit(std::string_view str) -> int {
     }
     return pids;
 }
+
+auto Utils::parse_gpus_string(std::string_view str) -> GpuRequest {
+    while (!str.empty() && std::isspace(static_cast<unsigned char>(str.front()))) {
+        str.remove_prefix(1);
+    }
+    while (!str.empty() && std::isspace(static_cast<unsigned char>(str.back()))) {
+        str.remove_suffix(1);
+    }
+    if (str.empty()) {
+        throw std::invalid_argument("Empty --gpus specification");
+    }
+
+    std::string lower;
+    lower.reserve(str.size());
+    for (char c : str) {
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+
+    if (lower == "all") {
+        return GpuRequest{.all_gpus = true, .gpu_indices = {}};
+    }
+
+    std::vector<int> indices;
+    size_t start = 0;
+    while (start <= str.size()) {
+        size_t comma = str.find(',', start);
+        std::string_view token = (comma == std::string_view::npos)
+            ? str.substr(start)
+            : str.substr(start, comma - start);
+
+        while (!token.empty() && std::isspace(static_cast<unsigned char>(token.front()))) {
+            token.remove_prefix(1);
+        }
+        while (!token.empty() && std::isspace(static_cast<unsigned char>(token.back()))) {
+            token.remove_suffix(1);
+        }
+
+        if (token.empty()) {
+            throw std::invalid_argument("Empty token in --gpus specification");
+        }
+
+        for (char c : token) {
+            if (!std::isdigit(static_cast<unsigned char>(c))) {
+                throw std::invalid_argument("Invalid GPU index '" + std::string(token) + "': must be non-negative integer");
+            }
+        }
+
+        try {
+            int idx = std::stoi(std::string(token));
+            indices.push_back(idx);
+        } catch (...) {
+            throw std::invalid_argument("Failed to parse GPU index: " + std::string(token));
+        }
+
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+
+    std::sort(indices.begin(), indices.end());
+    indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+
+    return GpuRequest{.all_gpus = false, .gpu_indices = std::move(indices)};
+}
+
