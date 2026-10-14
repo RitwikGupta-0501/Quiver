@@ -73,6 +73,7 @@ set(SOURCES
     src/utils.cpp
     src/command_line_handler.cpp
     src/cgroup.cpp
+    src/gpu_manager.cpp
 )
 
 add_executable(quiver ${SOURCES})

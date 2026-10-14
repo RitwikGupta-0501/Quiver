@@ -5,6 +5,7 @@
 #include "../include/device_manager.hpp"
 #include "../include/monitor.hpp"
 #include "../include/cgroup.hpp"
+#include "../include/gpu_manager.hpp"
 #include <cstdlib>
 #include <iostream>
 #include <fstream>
@@ -295,6 +296,16 @@ void Container::run_container(int slave_fd, const fs::path& filesystem_dir) {
 
     DeviceManager::create_terminal_devices();
 
+    if (GpuDeviceManager::is_gpu_requested(m_spec.resources)) {
+        std::string gpu_err;
+        if (!GpuDeviceManager::setup_device_mounts(m_spec.resources, "/old_root/dev", "/dev", gpu_err)) {
+            Utils::handle_error("GPU device passthrough failed: " + gpu_err);
+        }
+        if (!GpuDeviceManager::inject_driver_libraries("/old_root", "/", gpu_err)) {
+            std::cerr << "WARNING: GPU driver library injection incomplete: " << gpu_err << '\n';
+        }
+    }
+
     umount2("/old_root", MNT_DETACH);
     rmdir("/old_root");
 
@@ -330,6 +341,27 @@ void Container::run_container(int slave_fd, const fs::path& filesystem_dir) {
             std::string v = env_kv.substr(eq_pos + 1);
             ::setenv(k.c_str(), v.c_str(), 1);
         }
+    }
+
+    if (GpuDeviceManager::is_gpu_requested(m_spec.resources)) {
+        if (m_spec.resources.all_gpus) {
+            ::setenv("NVIDIA_VISIBLE_DEVICES", "all", 1);
+        } else {
+            std::string visible;
+            for (size_t i = 0; i < m_spec.resources.gpu_indices.size(); ++i) {
+                if (i > 0) visible += ",";
+                visible += std::to_string(m_spec.resources.gpu_indices[i]);
+            }
+            ::setenv("NVIDIA_VISIBLE_DEVICES", visible.c_str(), 1);
+        }
+        ::setenv("NVIDIA_DRIVER_CAPABILITIES", "compute,utility", 1);
+
+        const char* current_ld = ::getenv("LD_LIBRARY_PATH");
+        std::string new_ld = "/usr/lib:/usr/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64";
+        if (current_ld && *current_ld) {
+            new_ld = std::string(current_ld) + ":" + new_ld;
+        }
+        ::setenv("LD_LIBRARY_PATH", new_ld.c_str(), 1);
     }
 
     // Command resolution & execvp
