@@ -108,3 +108,22 @@ target_link_libraries(quiver_cgroup_tests PRIVATE
     Threads::Threads
 )
 add_test(NAME CgroupTests COMMAND quiver_cgroup_tests)
+
+add_executable(quiver_gpu_tests
+    tests/test_gpu.cpp
+    src/gpu_manager.cpp
+    src/cgroup.cpp
+    src/state_store.cpp
+    src/utils.cpp
+    src/monitor.cpp
+)
+target_include_directories(quiver_gpu_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(quiver_gpu_tests PRIVATE
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+    dl
+)
+add_test(NAME GpuTests COMMAND quiver_gpu_tests)
+
