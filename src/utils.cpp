@@ -4,16 +4,21 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <sys/stat.h>
-#include <string.h>
+#include <cstring>
 #include <iostream>
 #include <unistd.h>
 #include <openssl/sha.h>
+#include <openssl/evp.h>
+#include <sys/utsname.h>
 #include <random>
 #include <chrono>
 #include <dirent.h>
 #include <sys/wait.h>
 #include <format>
+#include <vector>
+#include <cctype>
 #include "utils.hpp"
 
 auto Utils::dir_exists(const fs::path& path) -> bool {
@@ -46,23 +51,47 @@ auto Utils::ensure_file(const fs::path& path) -> void {
 }
 
 auto Utils::write_file(const fs::path& path, std::string_view buffer) -> void {
-        fs::path parent_path{path.parent_path()};
-        if(!parent_path.empty() && !dir_exists(parent_path)) ensure_dirs(parent_path);
-        std::ofstream file{path, std::ios::app};
+    fs::path parent_path{path.parent_path()};
+    if (!parent_path.empty() && !dir_exists(parent_path)) ensure_dirs(parent_path);
 
-        if (!file.is_open()) [[unlikely]] {
-                throw std::runtime_error(std::format("File Error: couldn't open '{}'", path.string()));
-        }
+    int fd = ::open(path.c_str(), O_WRONLY | O_TRUNC | O_CREAT, 0644);
+    if (fd < 0) [[unlikely]] {
+        throw std::runtime_error(std::format("File Error: couldn't open '{}': {}", path.string(), std::strerror(errno)));
+    }
 
-        file << buffer;
-        if (!file) [[unlikely]] {
-                throw std::runtime_error(std::format("File Error: failed to write data to '{}'", path.string()));
+    const char* ptr = buffer.data();
+    size_t remaining = buffer.size();
+    while (remaining > 0) {
+        ssize_t written = ::write(fd, ptr, remaining);
+        if (written < 0) {
+            if (errno == EINTR) continue;
+            ::close(fd);
+            throw std::runtime_error(std::format("File Error: failed to write data to '{}': {}", path.string(), std::strerror(errno)));
         }
+        ptr += written;
+        remaining -= written;
+    }
+    ::close(fd);
+}
+
+auto Utils::append_file(const fs::path& path, std::string_view buffer) -> void {
+    fs::path parent_path{path.parent_path()};
+    if (!parent_path.empty() && !dir_exists(parent_path)) ensure_dirs(parent_path);
+
+    std::ofstream file{path, std::ios::out | std::ios::app};
+    if (!file.is_open()) [[unlikely]] {
+        throw std::runtime_error(std::format("File Error: couldn't open '{}' for append", path.string()));
+    }
+
+    file << buffer;
+    if (!file) [[unlikely]] {
+        throw std::runtime_error(std::format("File Error: failed to append data to '{}'", path.string()));
+    }
 }
 
 auto Utils::handle_error(const std::string& err) -> void {
-        std::cerr << err << '\n';
-        exit(EXIT_FAILURE);
+    std::cerr << err << '\n';
+    exit(EXIT_FAILURE);
 }
 
 std::string Utils::get_base_dir(){
@@ -72,7 +101,11 @@ std::string Utils::get_base_dir(){
 }
 
 std::string Utils::get_sock_path(const pid_t& pid){
-    std::string path{ get_base_dir() + "/containers/" + std::to_string(static_cast<long long>(pid)) };
+    return get_sock_path(std::to_string(static_cast<long long>(pid)));
+}
+
+std::string Utils::get_sock_path(std::string_view container_id){
+    std::string path{ get_base_dir() + "/containers/" + std::string(container_id) };
     ensure_dirs(path);
     return path + "/attach.sock";
 }
@@ -94,9 +127,13 @@ std::string Utils::get_image_path(const std::string& image_name){
 }
 
 std::string Utils::get_logs_path(const pid_t& pid){
-    std::string path{ get_base_dir() + "/logs/" + std::to_string(static_cast<long long>(pid)) };
+    return get_logs_path(std::to_string(static_cast<long long>(pid)));
+}
+
+std::string Utils::get_logs_path(std::string_view container_id){
+    std::string path{ get_base_dir() + "/logs" };
     ensure_dirs(path);
-    return path;
+    return path + "/" + std::string(container_id) + ".log";
 }
 
 void Utils::print_usage(){
@@ -187,31 +224,156 @@ int Utils::remove_directory_recursively(const std::string& path) {
     return rmdir(path.c_str());
 }
 
-bool Utils::extract_tarball(const std::string& tarball_path, const std::string& destination_path) {
-    pid_t pid{ fork() };
+bool Utils::extract_tarball(
+    const fs::path& tarball_path,
+    const fs::path& destination_path,
+    ArchiveCompression compression
+) {
+    ensure_dirs(destination_path);
+    pid_t pid = fork();
 
     if (pid == ERR) {
         perror("fork failed");
         return false;
     }
-    else if (pid == 0) {
-        execlp("tar", "tar", "-xzf", tarball_path.c_str(), "-C", destination_path.c_str(), NULL);
-        perror("execlp failed");
-        exit(ERR);
-    }
-    else {
-        int status{};
-        waitpid(pid, &status, 0);
+    if (pid == 0) {
+        std::vector<const char*> args;
+        args.push_back("tar");
+        args.push_back("--no-same-owner");
+        args.push_back("--no-same-permissions");
+        args.push_back("-x");
 
-        if (WIFEXITED(status)) {
-            int exit_code = WEXITSTATUS(status);
-            if (exit_code == 0) {
-                return true;
-            } else {
-                std::cerr << "Tar exited with error code: " << exit_code << std::endl;
-                return false;
-            }
+        switch (compression) {
+            case ArchiveCompression::Gzip:
+                args.push_back("-z");
+                break;
+            case ArchiveCompression::Zstd:
+                args.push_back("--zstd");
+                break;
+            case ArchiveCompression::Uncompressed:
+                break;
+            case ArchiveCompression::Auto:
+            default:
+                args.push_back("-a");
+                break;
         }
+
+        std::string tb_str = tarball_path.string();
+        std::string dest_str = destination_path.string();
+        args.push_back("-f");
+        args.push_back(tb_str.c_str());
+        args.push_back("-C");
+        args.push_back(dest_str.c_str());
+        args.push_back(nullptr);
+
+        execvp("tar", const_cast<char* const*>(args.data()));
+        perror("execvp tar failed");
+        _exit(127);
+    }
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) == ERR) {
+        perror("waitpid failed");
+        return false;
+    }
+
+    if (WIFEXITED(status)) {
+        int exit_code = WEXITSTATUS(status);
+        if (exit_code == 0) {
+            return true;
+        }
+        std::cerr << "Tar exited with error code: " << exit_code << std::endl;
+        return false;
     }
     return false;
+}
+
+auto Utils::verify_sha256_and_size(
+    const fs::path& file_path,
+    std::string_view expected_digest,
+    std::uintmax_t expected_size
+) -> bool {
+    std::error_code ec;
+    auto size = fs::file_size(file_path, ec);
+    if (ec || size != expected_size) {
+        return false;
+    }
+
+    std::string_view target_digest = expected_digest;
+    if (target_digest.starts_with("sha256:")) {
+        target_digest.remove_prefix(7);
+    }
+
+    std::ifstream file(file_path, std::ios::binary);
+    if (!file.is_open()) {
+        return false;
+    }
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) {
+        return false;
+    }
+
+    if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1) {
+        EVP_MD_CTX_free(ctx);
+        return false;
+    }
+
+    constexpr size_t buffer_size = 64 * 1024; // 64 KB
+    std::vector<char> buffer(buffer_size);
+
+    while (file.read(buffer.data(), buffer_size) || file.gcount() > 0) {
+        if (EVP_DigestUpdate(ctx, buffer.data(), file.gcount()) != 1) {
+            EVP_MD_CTX_free(ctx);
+            return false;
+        }
+    }
+
+    unsigned char hash[EVP_MAX_MD_SIZE];
+    unsigned int hash_len = 0;
+    if (EVP_DigestFinal_ex(ctx, hash, &hash_len) != 1) {
+        EVP_MD_CTX_free(ctx);
+        return false;
+    }
+    EVP_MD_CTX_free(ctx);
+
+    std::string hex_str;
+    hex_str.reserve(hash_len * 2);
+    static constexpr char hex_chars[] = "0123456789abcdef";
+    for (unsigned int i = 0; i < hash_len; ++i) {
+        hex_str.push_back(hex_chars[(hash[i] >> 4) & 0x0F]);
+        hex_str.push_back(hex_chars[hash[i] & 0x0F]);
+    }
+
+    if (hex_str.size() != target_digest.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < hex_str.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(hex_str[i])) !=
+            std::tolower(static_cast<unsigned char>(target_digest[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+auto Utils::get_host_oci_arch() -> std::string {
+    struct utsname uts{};
+    if (uname(&uts) != 0) {
+        return "amd64";
+    }
+    std::string_view machine = uts.machine;
+    if (machine == "x86_64") {
+        return "amd64";
+    }
+    if (machine == "aarch64" || machine == "arm64") {
+        return "arm64";
+    }
+    if (machine == "armv7l") {
+        return "arm";
+    }
+    if (machine == "riscv64") {
+        return "riscv64";
+    }
+    return uts.machine;
 }
