@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 #include <cpr/cpr.h>
 #include "state_store.hpp"
+#include "utils.hpp"
 
 using json = nlohmann::json;
 
@@ -32,11 +33,13 @@ class ImageManager {
         std::mutex m_progress_mutex;
 
         // Helper Functions
-        bool get_image(const std::string& imageName, std::string& outPath, std::string& error);
-        bool pull_image_from_registry(const std::string& imageName, const std::string& imagePath, std::string& error);
+        bool get_image(const std::string& imageName, std::string& outPath, ImageMetadata& outMeta, std::string& error);
+        bool pull_image_from_registry(const std::string& imageName, const std::string& imagePath, ImageMetadata& outMeta, std::string& error);
         bool get_manifest(const std::string& imageName, const std::string& token, json& outManifest, std::string& error);
         bool get_auth_token(const std::string& imageName, std::string& outToken, std::string& error);
+        bool fetch_and_parse_config(const json& manifest, const std::string& repo, const std::string& token, ImageMetadata& outMeta, std::string& error);
         bool download_and_extract_layers(const json& manifest, const std::string& repo, const std::string& token, const std::string& destinationPath, std::string& error);
+        bool apply_layer_with_whiteouts(const fs::path& tarball_path, const fs::path& destination_path, size_t layer_index, Utils::ArchiveCompression compression, std::string& error);
         bool extract_layer(const std::string& tarball_path, const std::string& destination_path, std::string& error);
 
         std::future<std::string> download_layer_async(const std::string& url, const std::string& token, const std::string& destination_path, const std::string& digest);
