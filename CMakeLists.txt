@@ -72,6 +72,7 @@ set(SOURCES
     src/monitor.cpp
     src/utils.cpp
     src/command_line_handler.cpp
+    src/cgroup.cpp
 )
 
 add_executable(quiver ${SOURCES})
