@@ -41,4 +41,7 @@ namespace Utils {
     ) -> bool;
     auto verify_sha256_and_size(const fs::path& file_path, std::string_view expected_digest, std::uintmax_t expected_size) -> bool;
     auto get_host_oci_arch() -> std::string;
+    auto parse_memory_string(std::string_view str) -> std::size_t;
+    auto parse_cpus_string(std::string_view str) -> double;
+    auto parse_pids_limit(std::string_view str) -> int;
 }

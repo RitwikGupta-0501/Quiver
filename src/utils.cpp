@@ -19,6 +19,7 @@
 #include <format>
 #include <vector>
 #include <cctype>
+#include <cmath>
 #include "utils.hpp"
 
 auto Utils::dir_exists(const fs::path& path) -> bool {
@@ -144,6 +145,9 @@ std::cout << "Usage: quiver <command> [options] [arguments]\n\n"
               << "      -n, --name <name>            Assign a name to the container\n"
               << "      -p, --port <host:cont>       Publish a container's port(s) to the host\n"
               << "      -v, --volume <host:cont>     Bind mount a volume\n"
+              << "      -m, --memory <limit>         Memory limit (e.g., 512m, 2g)\n"
+              << "      --cpus <quota>               Number of CPUs (e.g., 0.5, 2.0)\n"
+              << "      --pids-limit <max>           Tune container pids limit (default: 512)\n"
               << "      --vfs                        Use VFS (copy) instead of OverlayFS for package manager related\n"
               << "      --no-remove                  Do not remove the filesystem after exit\n\n"
 
@@ -377,4 +381,124 @@ auto Utils::get_host_oci_arch() -> std::string {
         return "riscv64";
     }
     return uts.machine;
+}
+
+auto Utils::parse_memory_string(std::string_view str) -> std::size_t {
+    while (!str.empty() && std::isspace(static_cast<unsigned char>(str.front()))) {
+        str.remove_prefix(1);
+    }
+    while (!str.empty() && std::isspace(static_cast<unsigned char>(str.back()))) {
+        str.remove_suffix(1);
+    }
+    if (str.empty() || str.front() == '-') {
+        throw std::invalid_argument("Invalid memory limit string");
+    }
+
+    std::string s(str);
+    size_t processed = 0;
+    double val = 0.0;
+    try {
+        val = std::stod(s, &processed);
+    } catch (...) {
+        throw std::invalid_argument("Failed to parse number in memory string");
+    }
+
+    if (processed == 0 || val <= 0.0 || std::isnan(val) || std::isinf(val)) {
+        throw std::invalid_argument("Memory limit must be greater than zero");
+    }
+
+    std::string_view suffix = str.substr(processed);
+    while (!suffix.empty() && std::isspace(static_cast<unsigned char>(suffix.front()))) {
+        suffix.remove_prefix(1);
+    }
+
+    std::string lower_suffix;
+    lower_suffix.reserve(suffix.size());
+    for (char c : suffix) {
+        lower_suffix.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+
+    std::uint64_t multiplier = 1;
+    if (lower_suffix.empty() || lower_suffix == "b") {
+        multiplier = 1ULL;
+    } else if (lower_suffix == "k" || lower_suffix == "kb" || lower_suffix == "kib") {
+        multiplier = 1024ULL;
+    } else if (lower_suffix == "m" || lower_suffix == "mb" || lower_suffix == "mib") {
+        multiplier = 1024ULL * 1024ULL;
+    } else if (lower_suffix == "g" || lower_suffix == "gb" || lower_suffix == "gib") {
+        multiplier = 1024ULL * 1024ULL * 1024ULL;
+    } else {
+        throw std::invalid_argument("Unknown memory unit suffix: " + lower_suffix);
+    }
+
+    double total = val * static_cast<double>(multiplier);
+    if (total <= 0.0 || std::isinf(total)) {
+        throw std::invalid_argument("Resulting memory value invalid");
+    }
+
+    auto bytes = static_cast<std::size_t>(std::llround(total));
+    if (bytes == 0) {
+        throw std::invalid_argument("Memory limit must be greater than 0");
+    }
+    return bytes;
+}
+
+auto Utils::parse_cpus_string(std::string_view str) -> double {
+    while (!str.empty() && std::isspace(static_cast<unsigned char>(str.front()))) {
+        str.remove_prefix(1);
+    }
+    while (!str.empty() && std::isspace(static_cast<unsigned char>(str.back()))) {
+        str.remove_suffix(1);
+    }
+    if (str.empty() || str.front() == '-') {
+        throw std::invalid_argument("Invalid cpus string");
+    }
+
+    std::string s(str);
+    size_t processed = 0;
+    double cpus = 0.0;
+    try {
+        cpus = std::stod(s, &processed);
+    } catch (...) {
+        throw std::invalid_argument("Failed to parse number in cpus string");
+    }
+
+    if (processed != s.size() || cpus <= 0.0 || std::isnan(cpus) || std::isinf(cpus)) {
+        throw std::invalid_argument("CPUs value must be a positive number");
+    }
+    return cpus;
+}
+
+auto Utils::parse_pids_limit(std::string_view str) -> int {
+    while (!str.empty() && std::isspace(static_cast<unsigned char>(str.front()))) {
+        str.remove_prefix(1);
+    }
+    while (!str.empty() && std::isspace(static_cast<unsigned char>(str.back()))) {
+        str.remove_suffix(1);
+    }
+    if (str.empty()) {
+        throw std::invalid_argument("Empty pids limit string");
+    }
+
+    if (str == "max" || str == "-1") {
+        return 0; // 0 or -1 indicates unlimited / max
+    }
+
+    if (str.front() == '-') {
+        throw std::invalid_argument("PIDs limit must be positive or 'max'");
+    }
+
+    std::string s(str);
+    size_t processed = 0;
+    int pids = 0;
+    try {
+        pids = std::stoi(s, &processed);
+    } catch (...) {
+        throw std::invalid_argument("Failed to parse integer in pids limit string");
+    }
+
+    if (processed != s.size() || pids < 1) {
+        throw std::invalid_argument("PIDs limit must be an integer >= 1");
+    }
+    return pids;
 }
