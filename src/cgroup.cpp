@@ -358,3 +358,158 @@ bool CgroupManager::cleanup() noexcept {
     m_active = false;
     return false;
 }
+
+std::optional<fs::path> CgroupManager::find_container_cgroup_dir(
+    std::string_view container_id,
+    pid_t container_pid,
+    const fs::path& cgroup_root
+) {
+    std::error_code ec;
+
+    if (container_pid > 0) {
+        fs::path proc_cgroup = "/proc/" + std::to_string(container_pid) + "/cgroup";
+        if (fs::exists(proc_cgroup, ec)) {
+            std::ifstream file(proc_cgroup);
+            std::string line;
+            while (std::getline(file, line)) {
+                if (line.starts_with("0::")) {
+                    std::string rel = line.substr(3);
+                    while (!rel.empty() && rel.front() == '/') {
+                        rel.erase(0, 1);
+                    }
+                    fs::path candidate = cgroup_root / rel;
+                    if (fs::exists(candidate, ec) && fs::is_directory(candidate, ec)) {
+                        return candidate.lexically_normal();
+                    }
+                }
+            }
+        }
+    }
+
+    std::string short_id = container_id.size() > 12 ? std::string(container_id.substr(0, 12)) : std::string(container_id);
+    std::string target_name = "quiver-" + short_id;
+
+    fs::path direct = cgroup_root / target_name;
+    if (fs::exists(direct, ec) && fs::is_directory(direct, ec)) {
+        return direct.lexically_normal();
+    }
+
+    fs::path sub = cgroup_root / "quiver" / target_name;
+    if (fs::exists(sub, ec) && fs::is_directory(sub, ec)) {
+        return sub.lexically_normal();
+    }
+
+    if (fs::exists(cgroup_root / std::string(container_id), ec) && fs::is_directory(cgroup_root / std::string(container_id), ec)) {
+        return (cgroup_root / std::string(container_id)).lexically_normal();
+    }
+
+    if (fs::exists(cgroup_root, ec) && fs::is_directory(cgroup_root, ec)) {
+        for (const auto& entry : fs::recursive_directory_iterator(cgroup_root, fs::directory_options::skip_permission_denied, ec)) {
+            if (ec) break;
+            if (entry.is_directory(ec)) {
+                std::string fn = entry.path().filename().string();
+                if (fn == target_name || fn == container_id) {
+                    return entry.path().lexically_normal();
+                }
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+bool CgroupManager::read_metrics(
+    const fs::path& cgroup_dir,
+    CgroupMetrics& out_metrics
+) {
+    std::error_code ec;
+    if (!fs::exists(cgroup_dir, ec) || !fs::is_directory(cgroup_dir, ec)) {
+        return false;
+    }
+
+    out_metrics = CgroupMetrics{};
+
+    fs::path mem_cur_path = cgroup_dir / "memory.current";
+    if (fs::exists(mem_cur_path, ec)) {
+        std::ifstream file(mem_cur_path);
+        std::uint64_t val = 0;
+        if (file >> val) {
+            out_metrics.memory_current_bytes = val;
+        }
+    }
+
+    fs::path mem_max_path = cgroup_dir / "memory.max";
+    if (fs::exists(mem_max_path, ec)) {
+        std::ifstream file(mem_max_path);
+        std::string str;
+        if (file >> str) {
+            if (str == "max") {
+                out_metrics.memory_max_bytes = 0;
+            } else {
+                try {
+                    out_metrics.memory_max_bytes = std::stoull(str);
+                } catch (...) {
+                    out_metrics.memory_max_bytes = 0;
+                }
+            }
+        }
+    }
+
+    fs::path cpu_stat_path = cgroup_dir / "cpu.stat";
+    if (fs::exists(cpu_stat_path, ec)) {
+        std::ifstream file(cpu_stat_path);
+        std::string line;
+        while (std::getline(file, line)) {
+            std::istringstream iss(line);
+            std::string key;
+            std::uint64_t val = 0;
+            if (iss >> key >> val) {
+                if (key == "usage_usec") {
+                    out_metrics.cpu_usage_usec = val;
+                } else if (key == "throttled_usec") {
+                    out_metrics.cpu_throttled_usec = val;
+                }
+            }
+        }
+    }
+
+    fs::path pids_cur_path = cgroup_dir / "pids.current";
+    if (fs::exists(pids_cur_path, ec)) {
+        std::ifstream file(pids_cur_path);
+        std::uint64_t val = 0;
+        if (file >> val) {
+            out_metrics.pids_current = val;
+        }
+    }
+
+    fs::path pids_max_path = cgroup_dir / "pids.max";
+    if (fs::exists(pids_max_path, ec)) {
+        std::ifstream file(pids_max_path);
+        std::string str;
+        if (file >> str) {
+            if (str == "max") {
+                out_metrics.pids_max = 0;
+            } else {
+                try {
+                    out_metrics.pids_max = std::stoull(str);
+                } catch (...) {
+                    out_metrics.pids_max = 0;
+                }
+            }
+        }
+    }
+
+    fs::path procs_path = cgroup_dir / "cgroup.procs";
+    if (fs::exists(procs_path, ec)) {
+        std::ifstream file(procs_path);
+        pid_t pid = 0;
+        while (file >> pid) {
+            if (pid > 0) {
+                out_metrics.pids.push_back(pid);
+            }
+        }
+    }
+
+    return true;
+}
+

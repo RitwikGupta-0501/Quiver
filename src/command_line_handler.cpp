@@ -3,11 +3,17 @@
 #include "image_manager.hpp"
 #include "command_line_handler.hpp"
 #include "container.hpp"
+#include "cgroup.hpp"
+#include "gpu_manager.hpp"
 #include <cstdlib>
 #include <unistd.h>
 #include <vector>
 #include <iostream>
 #include <algorithm>
+#include <chrono>
+#include <thread>
+#include <csignal>
+#include <unordered_map>
 
 CommandLineHandler::CommandLineHandler(StateStore& store, ImageManager& img_manager)
     : m_store(store), m_img_manager(img_manager) {}
@@ -839,8 +845,138 @@ void CommandLineHandler::vfs(const std::vector<std::string>& cmds) {
     }
 }
 
-void CommandLineHandler::stats(const std::vector<std::string>& cmds) {
-    (void)cmds;
-    std::cout << "CONTAINER ID   NAME             CPU %     MEM USAGE / LIMIT     PIDS        GPU UTIL   GPU VRAM\n";
+namespace {
+volatile sig_atomic_t g_stats_running = 1;
+void stats_sigint_handler(int) {
+    g_stats_running = 0;
 }
+} // namespace
+
+void CommandLineHandler::stats(const std::vector<std::string>& cmds) {
+    bool no_stream = false;
+    std::vector<std::string> requested_ids;
+
+    for (const auto& cmd : cmds) {
+        if (cmd == "--no-stream" || cmd == "--once") {
+            no_stream = true;
+        } else if (!cmd.starts_with('-')) {
+            requested_ids.push_back(cmd);
+        }
+    }
+
+    if (!isatty(STDOUT_FILENO)) {
+        no_stream = true;
+    }
+
+    struct sigaction sa{};
+    struct sigaction old_sa{};
+    if (!no_stream) {
+        g_stats_running = 1;
+        sa.sa_handler = stats_sigint_handler;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGINT, &sa, &old_sa);
+    }
+
+    NvmlTelemetryCollector nvml_collector;
+
+    struct ContainerCpuSample {
+        std::uint64_t usage_usec{0};
+        std::chrono::steady_clock::time_point time;
+    };
+    std::unordered_map<std::string, ContainerCpuSample> prev_samples;
+
+    auto render_once = [&](bool print_output) {
+        auto running_containers = m_store.list_containers(true);
+        std::vector<ContainerState> targets;
+        if (requested_ids.empty()) {
+            targets = std::move(running_containers);
+        } else {
+            for (const auto& req : requested_ids) {
+                for (const auto& cs : running_containers) {
+                    if (cs.id.starts_with(req) || cs.name == req) {
+                        targets.push_back(cs);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (targets.empty()) {
+            if (print_output) {
+                if (!no_stream) {
+                    std::cout << "\033[2J\033[H";
+                }
+                std::cout << "CONTAINER ID   NAME             CPU %     MEM USAGE / LIMIT       PIDS        GPU UTIL   GPU VRAM\n";
+            }
+            return;
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        std::vector<std::pair<ContainerState, CgroupMetrics>> metrics_list;
+        std::vector<double> cpu_pcts;
+
+        for (const auto& cs : targets) {
+            auto cg_dir = CgroupManager::find_container_cgroup_dir(cs.id, cs.pid);
+            CgroupMetrics cm{};
+            if (cg_dir) {
+                (void)CgroupManager::read_metrics(*cg_dir, cm);
+            }
+
+            double cpu_pct = 0.0;
+            auto it = prev_samples.find(cs.id);
+            if (it != prev_samples.end()) {
+                auto delta_time_us = std::chrono::duration_cast<std::chrono::microseconds>(now - it->second.time).count();
+                if (delta_time_us > 0 && cm.cpu_usage_usec >= it->second.usage_usec) {
+                    auto delta_usage_us = cm.cpu_usage_usec - it->second.usage_usec;
+                    cpu_pct = (static_cast<double>(delta_usage_us) / static_cast<double>(delta_time_us)) * 100.0;
+                }
+            }
+            prev_samples[cs.id] = ContainerCpuSample{ cm.cpu_usage_usec, now };
+
+            metrics_list.emplace_back(cs, cm);
+            cpu_pcts.push_back(cpu_pct);
+        }
+
+        if (print_output) {
+            if (!no_stream) {
+                std::cout << "\033[2J\033[H";
+            }
+            std::cout << "CONTAINER ID   NAME             CPU %     MEM USAGE / LIMIT       PIDS        GPU UTIL   GPU VRAM\n";
+
+            for (size_t idx = 0; idx < metrics_list.size(); ++idx) {
+                const auto& cs = metrics_list[idx].first;
+                const auto& cm = metrics_list[idx].second;
+                double cpu_pct = cpu_pcts[idx];
+
+                std::vector<GpuDeviceTelemetry> gpu_telemetry;
+                bool gpu_req = GpuDeviceManager::is_gpu_requested(cs.resources);
+                if (gpu_req && nvml_collector.is_available()) {
+                    gpu_telemetry = nvml_collector.collect_metrics(cs.resources, cm.pids);
+                }
+
+                std::cout << GpuDeviceManager::format_stats_row(
+                    cs.id, cs.name, cpu_pct, cm, gpu_telemetry, gpu_req
+                ) << '\n';
+            }
+            std::cout.flush();
+        }
+    };
+
+    if (no_stream) {
+        render_once(false);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        render_once(true);
+    } else {
+        render_once(false);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        while (g_stats_running) {
+            render_once(true);
+            for (int i = 0; i < 10 && g_stats_running; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+        sigaction(SIGINT, &old_sa, nullptr);
+    }
+}
+
 

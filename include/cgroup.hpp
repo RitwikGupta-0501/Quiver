@@ -10,6 +10,16 @@
 
 namespace fs = std::filesystem;
 
+struct CgroupMetrics {
+    std::uint64_t memory_current_bytes{0};
+    std::uint64_t memory_max_bytes{0}; // 0 = unlimited ("max")
+    std::uint64_t cpu_usage_usec{0};
+    std::uint64_t cpu_throttled_usec{0};
+    std::uint64_t pids_current{0};
+    std::uint64_t pids_max{0};         // 0 = unlimited ("max")
+    std::vector<pid_t> pids{};
+};
+
 class CgroupManager {
 public:
     static constexpr std::uint64_t DEFAULT_CPU_PERIOD_US = 100'000; // 100ms standard CFS period
@@ -39,6 +49,18 @@ public:
     [[nodiscard]] static std::string format_memory_max(std::size_t memory_max_bytes);
     [[nodiscard]] static std::string format_cpu_max(double cpus, std::uint64_t period_us = DEFAULT_CPU_PERIOD_US);
     [[nodiscard]] static std::string format_pids_max(int pids_max);
+
+    // Telemetry readers
+    [[nodiscard]] static std::optional<fs::path> find_container_cgroup_dir(
+        std::string_view container_id,
+        pid_t container_pid = -1,
+        const fs::path& cgroup_root = "/sys/fs/cgroup"
+    );
+
+    [[nodiscard]] static bool read_metrics(
+        const fs::path& cgroup_dir,
+        CgroupMetrics& out_metrics
+    );
 
     // Inspection helpers
     [[nodiscard]] const fs::path& cgroup_path() const noexcept { return m_cgroup_dir; }
