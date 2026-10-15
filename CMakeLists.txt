@@ -68,7 +68,6 @@ set(SOURCES
     src/image_manager.cpp
     src/network.cpp
     src/terminal.cpp
-    src/volumes.cpp
     src/monitor.cpp
     src/utils.cpp
     src/command_line_handler.cpp
