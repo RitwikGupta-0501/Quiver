@@ -4,6 +4,7 @@
 #include <vector>
 #include <future>
 #include <mutex>
+#include <atomic>
 #include <map>
 #include <nlohmann/json.hpp>
 #include <cpr/cpr.h>
@@ -31,6 +32,7 @@ class ImageManager {
         };
         std::map<std::string, DownloadProgress> m_download_progress;
         std::mutex m_progress_mutex;
+        std::atomic<bool> m_stop_progress{false};
 
         // Helper Functions
         bool get_image(const std::string& imageName, std::string& outPath, ImageMetadata& outMeta, std::string& error);

@@ -348,7 +348,7 @@ std::future<std::string> ImageManager::download_layer_async(const std::string& u
 
 void ImageManager::print_progress() {
     bool downloads_finished = false;
-    while (!downloads_finished) {
+    while (!downloads_finished && !m_stop_progress.load()) {
         long long total_downloaded = 0;
         long long total_size = 0;
         int completed_layers = 0;
@@ -451,22 +451,44 @@ bool ImageManager::apply_layer_with_whiteouts(
     std::vector<fs::path> items_to_copy;
     for (auto it = fs::recursive_directory_iterator(staging_dir, fs::directory_options::skip_permission_denied);
          it != fs::recursive_directory_iterator(); ++it) {
-        if (it->is_directory()) {
+        std::error_code type_ec;
+        auto status = it->symlink_status(type_ec);
+        if (fs::is_symlink(status)) {
+            items_to_copy.push_back(it->path());
+        } else if (fs::is_directory(status)) {
             dirs_to_create.push_back(it->path());
         } else {
             items_to_copy.push_back(it->path());
         }
     }
+
     for (const auto& d : dirs_to_create) {
         fs::path rel = fs::relative(d, staging_dir);
-        Utils::ensure_dirs(destination_path / rel);
+        fs::path dest_dir = destination_path / rel;
+        // If a lower layer had a file or symlink at dest_dir, remove it before creating directory
+        std::error_code sym_ec;
+        if (fs::is_symlink(fs::symlink_status(dest_dir, sym_ec)) ||
+            (fs::exists(dest_dir, sym_ec) && !fs::is_directory(dest_dir, sym_ec))) {
+            fs::remove(dest_dir, ec);
+        }
+        Utils::ensure_dirs(dest_dir);
     }
+
     for (const auto& item : items_to_copy) {
         fs::path rel = fs::relative(item, staging_dir);
         fs::path dest = destination_path / rel;
         Utils::ensure_dirs(dest.parent_path());
         fs::remove_all(dest, ec);
-        fs::copy(item, dest, fs::copy_options::copy_symlinks | fs::copy_options::overwrite_existing, ec);
+
+        std::error_code sym_ec;
+        if (fs::is_symlink(fs::symlink_status(item, sym_ec))) {
+            fs::path target = fs::read_symlink(item, ec);
+            if (!ec) {
+                fs::create_symlink(target, dest, ec);
+            }
+        } else {
+            fs::copy(item, dest, fs::copy_options::overwrite_existing, ec);
+        }
     }
 
     fs::remove_all(staging_dir, ec);
@@ -488,12 +510,16 @@ bool ImageManager::download_and_extract_layers(const json& manifest, const std::
     std::vector<std::string> digests;
     std::vector<std::uintmax_t> sizes;
     std::vector<std::string> media_types;
-    for (const auto& layer : manifest["layers"]) {
-        std::string d = layer["digest"].get<std::string>();
-        digests.push_back(d);
-        sizes.push_back(layer.value("size", 0ULL));
-        media_types.push_back(layer.value("mediaType", ""));
-        m_download_progress[d] = {0, 0};
+    {
+        std::lock_guard<std::mutex> lock(m_progress_mutex);
+        m_download_progress.clear();
+        for (const auto& layer : manifest["layers"]) {
+            std::string d = layer["digest"].get<std::string>();
+            digests.push_back(d);
+            sizes.push_back(layer.value("size", 0ULL));
+            media_types.push_back(layer.value("mediaType", ""));
+            m_download_progress[d] = {0, 0};
+        }
     }
 
     std::vector<std::future<std::string>> download_futures;
@@ -508,13 +534,25 @@ bool ImageManager::download_and_extract_layers(const json& manifest, const std::
         download_futures.push_back(download_layer_async(url, token, path, digest));
     }
 
+    m_stop_progress.store(false);
     std::thread progress_thread(&ImageManager::print_progress, this);
+    struct ProgressJoiner {
+        std::thread& t;
+        std::atomic<bool>& stop;
+        ~ProgressJoiner() {
+            stop.store(true);
+            if (t.joinable()) {
+                t.join();
+            }
+        }
+    } progress_guard{progress_thread, m_stop_progress};
 
     for (size_t i = 0; i < digests.size(); ++i) {
         std::string download_error = download_futures[i].get();
         if (!download_error.empty()) {
             error = download_error;
-            progress_thread.join();
+            m_stop_progress.store(true);
+            if (progress_thread.joinable()) progress_thread.join();
             for (const auto& p : tarball_paths) {
                 std::error_code ec;
                 fs::remove(p, ec);
@@ -523,7 +561,8 @@ bool ImageManager::download_and_extract_layers(const json& manifest, const std::
         }
     }
 
-    progress_thread.join();
+    m_stop_progress.store(true);
+    if (progress_thread.joinable()) progress_thread.join();
 
     std::cout << "Download complete. Verifying layer digests..." << '\n';
     for (size_t i = 0; i < digests.size(); ++i) {
@@ -571,4 +610,6 @@ std::string ImageManager::get_image_path(const std::string& image_name) const {
     return this->base_cache_path + "/" + safe_image_name;
 }
 
-ImageManager::~ImageManager() {}
+ImageManager::~ImageManager() {
+    m_stop_progress.store(true);
+}
