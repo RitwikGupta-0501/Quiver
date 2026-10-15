@@ -46,6 +46,8 @@ struct ContainerState {
     std::string hostname{};
     std::string rootfs_path{};       // Lowerdir image path
     std::string bundle_path{};       // ~/.quiver/containers/<id>
+    std::string working_dir{"/"};
+    std::vector<std::string> env{};
     std::vector<std::string> command{"/bin/sh"};
     bool use_vfs{false};
     bool no_remove{false};
@@ -53,10 +55,10 @@ struct ContainerState {
     std::vector<PortMapping> ports{};
     ResourceLimits resources{};
 
-    NLOHMANN_DEFINE_TYPE_INTRUSIVE(
+    NLOHMANN_DEFINE_TYPE_INTRUSIVE_WITH_DEFAULT(
         ContainerState, id, name, image, pid, net_pid, status, created_at,
-        hostname, rootfs_path, bundle_path, command, use_vfs, no_remove,
-        volumes, ports, resources
+        hostname, rootfs_path, bundle_path, working_dir, env, command,
+        use_vfs, no_remove, volumes, ports, resources
     )
 };
 

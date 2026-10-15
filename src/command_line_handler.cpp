@@ -718,6 +718,8 @@ void CommandLineHandler::create(const std::vector<std::string>& cmds) {
         cs.hostname = spec.hostname;
         cs.rootfs_path = spec.rootfs_path;
         cs.bundle_path = m_store.container_bundle_dir(spec.id).string();
+        cs.working_dir = spec.working_dir.empty() ? "/" : spec.working_dir;
+        cs.env = spec.env;
         cs.command = spec.command.empty() ? std::vector<std::string>{"/bin/sh"} : spec.command;
         cs.use_vfs = spec.use_vfs;
         cs.no_remove = spec.no_remove;
@@ -771,21 +773,25 @@ void CommandLineHandler::start(const std::vector<std::string>& cmds) {
         spec.volumes = opt->volumes;
         spec.ports = opt->ports;
         spec.resources = opt->resources;
+        spec.working_dir = opt->working_dir;
+        spec.env = opt->env;
 
-        std::string img_name, img_tag;
-        size_t colon_pos = spec.image.find(':');
-        if (colon_pos != std::string::npos) {
-            img_name = spec.image.substr(0, colon_pos);
-            img_tag = spec.image.substr(colon_pos + 1);
-        } else {
-            img_name = spec.image;
-            img_tag = "latest";
-        }
-        auto img_meta = m_store.get_image(img_name, img_tag);
-        if (img_meta.has_value()) {
-            spec.env = img_meta->default_env;
-            if (!img_meta->working_dir.empty()) {
-                spec.working_dir = img_meta->working_dir;
+        if (spec.env.empty()) {
+            std::string img_name, img_tag;
+            size_t colon_pos = spec.image.find(':');
+            if (colon_pos != std::string::npos) {
+                img_name = spec.image.substr(0, colon_pos);
+                img_tag = spec.image.substr(colon_pos + 1);
+            } else {
+                img_name = spec.image;
+                img_tag = "latest";
+            }
+            auto img_meta = m_store.get_image(img_name, img_tag);
+            if (img_meta.has_value()) {
+                spec.env = img_meta->default_env;
+                if (!img_meta->working_dir.empty() && (spec.working_dir.empty() || spec.working_dir == "/")) {
+                    spec.working_dir = img_meta->working_dir;
+                }
             }
         }
 
