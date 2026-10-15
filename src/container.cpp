@@ -210,6 +210,8 @@ void Container::manage_container(const fs::path& filesystem_dir) {
         cs.hostname = m_spec.hostname.empty() ? m_spec.id.substr(0, 6) : m_spec.hostname;
         cs.rootfs_path = m_spec.rootfs_path;
         cs.bundle_path = m_store.container_bundle_dir(m_spec.id).string();
+        cs.working_dir = m_spec.working_dir.empty() ? "/" : m_spec.working_dir;
+        cs.env = m_spec.env;
         cs.command = m_spec.command.empty() ? std::vector<std::string>{"/bin/sh"} : m_spec.command;
         cs.use_vfs = m_spec.use_vfs;
         cs.no_remove = m_spec.no_remove;
