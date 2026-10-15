@@ -17,6 +17,7 @@
 #include <format>
 #include <unistd.h>
 #include <signal.h>
+#include <sys/prctl.h>
 
 Container::Container(ContainerSpec spec, StateStore& store)
     : m_spec(std::move(spec)), m_store(store) {}
@@ -115,6 +116,11 @@ void Container::manage_container(const fs::path& filesystem_dir) {
     }
 
     if (m_child_pid == 0) {
+        // Child process: immediately close the PTY master FD so it never leaks into the container
+        if (m_pty_args.master_fd >= 0) {
+            ::close(m_pty_args.master_fd);
+            m_pty_args.master_fd = -1;
+        }
         close(parent_to_child_pipe[1]);
         close(child_to_parent_pipe[0]);
 
@@ -134,12 +140,17 @@ void Container::manage_container(const fs::path& filesystem_dir) {
         }
         close(parent_to_child_pipe[0]);
 
+        pid_t parent_pid = ::getpid();
         pid_t container_init = fork();
         if (container_init == ERR) {
             Utils::handle_error("fork for PID namespace failed");
         }
 
         if (container_init == 0) {
+            ::prctl(PR_SET_PDEATHSIG, SIGKILL);
+            if (::getppid() != parent_pid) {
+                _exit(1);
+            }
             run_container(m_pty_args.slave_fd, filesystem_dir);
         } else {
             close(m_pty_args.slave_fd);
@@ -149,6 +160,11 @@ void Container::manage_container(const fs::path& filesystem_dir) {
             _exit(WIFEXITED(status) ? WEXITSTATUS(status) : 1);
         }
     } else {
+        // Manager parent process: immediately close the PTY slave FD so master_fd receives POLLHUP on container exit
+        if (m_pty_args.slave_fd >= 0) {
+            ::close(m_pty_args.slave_fd);
+            m_pty_args.slave_fd = -1;
+        }
         close(parent_to_child_pipe[0]);
         close(child_to_parent_pipe[1]);
 
