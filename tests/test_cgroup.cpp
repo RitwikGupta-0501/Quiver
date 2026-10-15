@@ -135,6 +135,8 @@ static void test_state_store_resource_persistence() {
     cs.id = "test-container-res-123";
     cs.name = "test-res";
     cs.image = "alpine:latest";
+    cs.working_dir = "/workspace";
+    cs.env = {"CUDA_VISIBLE_DEVICES=0", "OMP_NUM_THREADS=4"};
     cs.resources.memory_max_bytes = 1073741824ULL;
     cs.resources.cpus = 2.0;
     cs.resources.pids_max = 128;
@@ -143,6 +145,8 @@ static void test_state_store_resource_persistence() {
 
     auto loaded = store.get_container("test-container-res-123");
     assert(loaded.has_value());
+    assert(loaded->working_dir == "/workspace");
+    assert((loaded->env == std::vector<std::string>{"CUDA_VISIBLE_DEVICES=0", "OMP_NUM_THREADS=4"}));
     assert(loaded->resources.memory_max_bytes == 1073741824ULL);
     assert(loaded->resources.cpus == 2.0);
     assert(loaded->resources.pids_max == 128);

@@ -270,6 +270,28 @@ static void test_nvml_graceful_runtime_loader_and_telemetry_formatting() {
     );
     assert(row_no_gpu.find("N/A") != std::string::npos);
 
+    // 4. Multi-GPU format_stats_row testing (Sub-Phase 6F regression assertion)
+    GpuDeviceTelemetry gt0{};
+    gt0.index = 0;
+    gt0.gpu_utilization_pct = 40;
+    gt0.temperature_c = 50;
+    gt0.used_vram_bytes = 1073741824ULL;  // 1.00 GiB
+    gt0.total_vram_bytes = 8589934592ULL; // 8.00 GiB
+
+    GpuDeviceTelemetry gt1{};
+    gt1.index = 1;
+    gt1.gpu_utilization_pct = 80;
+    gt1.temperature_c = 65;
+    gt1.used_vram_bytes = 3221225472ULL;  // 3.00 GiB
+    gt1.total_vram_bytes = 8589934592ULL; // 8.00 GiB
+
+    std::string row_multi_gpu = GpuDeviceManager::format_stats_row(
+        "b2c3d4e5f6a1", "quiver-multi-gpu", 28.5, cm, {gt0, gt1}, /*gpu_requested=*/true
+    );
+    assert(row_multi_gpu.find("60%") != std::string::npos);
+    assert(row_multi_gpu.find("4.00 GiB / 16.00 GiB") != std::string::npos);
+    assert(row_multi_gpu.find("(65C)") != std::string::npos);
+
     std::cout << "[PASS] test_nvml_graceful_runtime_loader_and_telemetry_formatting\n";
 }
 
