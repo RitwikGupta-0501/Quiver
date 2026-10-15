@@ -4,6 +4,8 @@
 #include "state_store.hpp"
 #include "image_manager.hpp"
 
+struct ContainerSpec;
+
 class CommandLineHandler {
 public:
     explicit CommandLineHandler(StateStore& store, ImageManager& img_manager);
@@ -26,4 +28,10 @@ public:
 private:
     StateStore& m_store;
     ImageManager& m_img_manager;
+
+    bool parse_container_options(
+        const std::vector<std::string>& cmds,
+        ContainerSpec& out_spec,
+        std::string& out_error
+    );
 };
