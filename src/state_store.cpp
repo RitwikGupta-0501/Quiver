@@ -7,6 +7,11 @@
 #include <unistd.h>
 #include <csignal>
 #include <iostream>
+#include <atomic>
+#include <thread>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 
 StateStore::StateStore(fs::path base_dir)
     : m_base_dir(std::move(base_dir))
@@ -25,19 +30,41 @@ void StateStore::ensure_store_layout() const {
 }
 
 bool StateStore::atomic_write_json(const fs::path& target_path, const nlohmann::json& j) {
+    static std::atomic<std::uint64_t> s_write_seq{0};
     try {
         Utils::ensure_dirs(target_path.parent_path());
         fs::path tmp_path = target_path;
-        tmp_path += ".tmp." + std::to_string(::getpid());
+        auto tid_hash = std::hash<std::thread::id>{}(std::this_thread::get_id());
+        auto seq = s_write_seq.fetch_add(1, std::memory_order_relaxed);
+        tmp_path += ".tmp." + std::to_string(::getpid()) + "." +
+                    std::to_string(tid_hash) + "." + std::to_string(seq);
 
-        {
-            std::ofstream ofs(tmp_path, std::ios::out | std::ios::trunc);
-            if (!ofs.is_open()) return false;
-            ofs << j.dump(4) << '\n';
-            ofs.flush();
-            if (!ofs.good()) return false;
+        int fd = ::open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (fd < 0) return false;
+
+        std::string payload = j.dump(4) + "\n";
+        const char* ptr = payload.data();
+        size_t remaining = payload.size();
+        while (remaining > 0) {
+            ssize_t written = ::write(fd, ptr, remaining);
+            if (written < 0) {
+                if (errno == EINTR) continue;
+                ::close(fd);
+                std::error_code ec;
+                fs::remove(tmp_path, ec);
+                return false;
+            }
+            ptr += written;
+            remaining -= static_cast<size_t>(written);
         }
-        fs::rename(tmp_path, target_path);
+        ::close(fd);
+
+        std::error_code ec;
+        fs::rename(tmp_path, target_path, ec);
+        if (ec) {
+            fs::remove(tmp_path, ec);
+            return false;
+        }
         return true;
     } catch (const std::exception& e) {
         std::cerr << "StateStore error writing " << target_path << ": " << e.what() << '\n';
@@ -170,6 +197,13 @@ std::vector<ContainerState> StateStore::list_containers_by_image(std::string_vie
 }
 
 bool StateStore::register_image(const ImageMetadata& img) const {
+    fs::path lock_path = m_base_dir / "images" / ".index.lock";
+    Utils::ensure_dirs(lock_path.parent_path());
+    int lock_fd = ::open(lock_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (lock_fd >= 0) {
+        ::flock(lock_fd, LOCK_EX);
+    }
+
     auto images = list_images();
     std::erase_if(images, [&](const ImageMetadata& existing) {
         return existing.name == img.name && existing.tag == img.tag;
@@ -179,7 +213,13 @@ bool StateStore::register_image(const ImageMetadata& img) const {
     if (copy.created_at.empty()) copy.created_at = current_iso8601_time();
     images.push_back(std::move(copy));
 
-    return atomic_write_json(m_images_index_file, nlohmann::json(images));
+    bool ok = atomic_write_json(m_images_index_file, nlohmann::json(images));
+
+    if (lock_fd >= 0) {
+        ::flock(lock_fd, LOCK_UN);
+        ::close(lock_fd);
+    }
+    return ok;
 }
 
 std::optional<ImageMetadata> StateStore::get_image(std::string_view name, std::string_view tag) const {
@@ -190,13 +230,32 @@ std::optional<ImageMetadata> StateStore::get_image(std::string_view name, std::s
 }
 
 bool StateStore::remove_image(std::string_view name, std::string_view tag) const {
+    fs::path lock_path = m_base_dir / "images" / ".index.lock";
+    Utils::ensure_dirs(lock_path.parent_path());
+    int lock_fd = ::open(lock_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (lock_fd >= 0) {
+        ::flock(lock_fd, LOCK_EX);
+    }
+
     auto images = list_images();
     auto prev_size = images.size();
     std::erase_if(images, [&](const ImageMetadata& existing) {
         return existing.name == name && existing.tag == tag;
     });
-    if (images.size() == prev_size) return false;
-    return atomic_write_json(m_images_index_file, nlohmann::json(images));
+    if (images.size() == prev_size) {
+        if (lock_fd >= 0) {
+            ::flock(lock_fd, LOCK_UN);
+            ::close(lock_fd);
+        }
+        return false;
+    }
+    bool ok = atomic_write_json(m_images_index_file, nlohmann::json(images));
+
+    if (lock_fd >= 0) {
+        ::flock(lock_fd, LOCK_UN);
+        ::close(lock_fd);
+    }
+    return ok;
 }
 
 std::vector<ImageMetadata> StateStore::list_images() const {

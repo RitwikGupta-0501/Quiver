@@ -20,6 +20,8 @@
 #include <vector>
 #include <cctype>
 #include <cmath>
+#include <atomic>
+#include <thread>
 #include "utils.hpp"
 
 auto Utils::dir_exists(const fs::path& path) -> bool {
@@ -186,18 +188,35 @@ std::cout << "Usage: quiver <command> [options] [arguments]\n\n"
 }
 
 std::string Utils::generate_container_id() {
+    static std::atomic<std::uint64_t> counter{0};
     auto now = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    pid_t pid = ::getpid();
+    auto tid_hash = std::hash<std::thread::id>{}(std::this_thread::get_id());
+    auto seq = counter.fetch_add(1, std::memory_order_relaxed);
     std::random_device rd;
-    std::string input = std::to_string(now) + ":" + std::to_string(rd());
+    auto r1 = rd();
+    auto r2 = rd();
 
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256(reinterpret_cast<const unsigned char*>(input.c_str()), input.size(), hash);
+    std::string input = std::to_string(now) + ":" + std::to_string(pid) + ":" +
+                        std::to_string(tid_hash) + ":" + std::to_string(seq) + ":" +
+                        std::to_string(r1) + ":" + std::to_string(r2);
+
+    unsigned char hash[EVP_MAX_MD_SIZE];
+    unsigned int hash_len = 0;
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (ctx) {
+        if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) == 1 &&
+            EVP_DigestUpdate(ctx, input.data(), input.size()) == 1) {
+            EVP_DigestFinal_ex(ctx, hash, &hash_len);
+        }
+        EVP_MD_CTX_free(ctx);
+    }
 
     std::string hexString;
-    hexString.reserve(SHA256_DIGEST_LENGTH * 2);
+    hexString.reserve(hash_len * 2);
     static const char hexDigits[] = "0123456789abcdef";
 
-    for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+    for (unsigned int i = 0; i < hash_len; i++) {
         hexString += hexDigits[(hash[i] >> 4) & 0xF];
         hexString += hexDigits[hash[i] & 0xF];
     }

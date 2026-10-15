@@ -98,22 +98,51 @@ void Terminal::start_server(const PtyArgs& args, const std::string& container_id
     m_running = true;
     m_sfd = sfd;
 
+    namespace fs = std::filesystem;
+    fs::path log_path = fs::path(Utils::get_base_dir()) / "containers" / container_id / "stdout.log";
+    std::error_code ec;
+    fs::create_directories(log_path.parent_path(), ec);
+    int log_fd = ::open(log_path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+
     while (true) {
         siginfo_t info{};
         if (waitid(P_PID, container_pid, &info, WEXITED | WNOHANG | WNOWAIT) == 0 && info.si_pid == container_pid) {
             break;
         }
 
-        pollfd pf{};
-        pf.fd = sfd;
-        pf.events = POLLIN;
-        int rv = poll(&pf, 1, 500);
+        pollfd pf[2]{};
+        pf[0].fd = sfd;
+        pf[0].events = POLLIN;
+        pf[1].fd = args.master_fd;
+        pf[1].events = POLLIN;
+        int rv = poll(pf, 2, 500);
 
         if (rv < 0) {
             if (errno == EINTR) continue;
             break;
         }
         if (rv == 0) {
+            continue;
+        }
+
+        if (pf[1].revents & POLLIN) {
+            char buf[4096]{};
+            ssize_t n = read(args.master_fd, buf, sizeof(buf));
+            if (n > 0) {
+                if (log_fd >= 0) {
+                    [[maybe_unused]] auto _w = ::write(log_fd, buf, n);
+                }
+            } else if (n <= 0) {
+                m_running = false;
+                break;
+            }
+        }
+        if (pf[1].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            m_running = false;
+            break;
+        }
+
+        if (!(pf[0].revents & POLLIN)) {
             continue;
         }
 
@@ -160,8 +189,13 @@ void Terminal::start_server(const PtyArgs& args, const std::string& container_id
                 if (n <= 0) {
                     m_running = false;
                     client_connected = false;
-                } else if (write(cfd, buf, n) <= 0) {
-                    client_connected = false;
+                } else {
+                    if (log_fd >= 0) {
+                        [[maybe_unused]] auto _w = ::write(log_fd, buf, n);
+                    }
+                    if (write(cfd, buf, n) <= 0) {
+                        client_connected = false;
+                    }
                 }
             }
 
@@ -181,6 +215,9 @@ void Terminal::start_server(const PtyArgs& args, const std::string& container_id
         if (!m_running) {
             break;
         }
+    }
+    if (log_fd >= 0) {
+        ::close(log_fd);
     }
     cleanup();
 }
