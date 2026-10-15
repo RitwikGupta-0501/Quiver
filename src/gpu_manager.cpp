@@ -369,13 +369,24 @@ std::string GpuDeviceManager::format_stats_row(
     std::string gpu_vram_str = "N/A";
 
     if (gpu_requested && !gpu_metrics.empty()) {
-        const auto& g = gpu_metrics[0];
-        if (g.temperature_c > 0) {
-            gpu_util_str = std::format("{}% ({}C)", g.gpu_utilization_pct, g.temperature_c);
-        } else {
-            gpu_util_str = std::format("{}%", g.gpu_utilization_pct);
+        std::uint64_t total_used_vram = 0;
+        std::uint64_t total_cap_vram = 0;
+        unsigned int sum_util = 0;
+        unsigned int max_temp = 0;
+
+        for (const auto& g : gpu_metrics) {
+            total_used_vram += g.used_vram_bytes;
+            total_cap_vram += g.total_vram_bytes;
+            sum_util += g.gpu_utilization_pct;
+            max_temp = std::max(max_temp, g.temperature_c);
         }
-        gpu_vram_str = format_bytes(g.used_vram_bytes) + " / " + format_bytes(g.total_vram_bytes);
+        unsigned int avg_util = static_cast<unsigned int>(sum_util / gpu_metrics.size());
+        if (max_temp > 0) {
+            gpu_util_str = std::format("{}% ({}C)", avg_util, max_temp);
+        } else {
+            gpu_util_str = std::format("{}%", avg_util);
+        }
+        gpu_vram_str = format_bytes(total_used_vram) + " / " + format_bytes(total_cap_vram);
     }
 
     return std::format("{:<14} {:<16} {:<9} {:<23} {:<11} {:<10} {}",
