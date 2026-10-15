@@ -33,9 +33,6 @@ namespace Utils {
     auto get_base_dir() -> std::string;
     auto get_sock_path(const pid_t& pid) -> std::string;
     auto get_sock_path(std::string_view container_id) -> std::string;
-    auto get_filesystem_path(const pid_t& pid) -> std::string;
-    auto get_vfs_path(const pid_t& pid) -> std::string;
-    auto get_image_path(const std::string& image_name) -> std::string;
     auto get_logs_path(const pid_t& pid) -> std::string;
     auto get_logs_path(std::string_view container_id) -> std::string;
     auto generate_container_id() -> std::string;

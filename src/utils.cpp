@@ -113,22 +113,6 @@ std::string Utils::get_sock_path(std::string_view container_id){
     return path + "/attach.sock";
 }
 
-std::string Utils::get_filesystem_path(const pid_t& pid){
-    std::string path{ get_base_dir() + "/filesystems/" + std::to_string(static_cast<long long>(pid)) };
-    ensure_dirs(path);
-    return path;
-}
-
-std::string Utils::get_vfs_path(const pid_t &pid){
-    std::string path{ get_base_dir() + "/vfs/" + std::to_string(static_cast<long long>(pid)) };
-    return path;
-}
-
-std::string Utils::get_image_path(const std::string& image_name){
-    std::string path{ get_base_dir() + "/images/" + image_name};
-    return path;
-}
-
 std::string Utils::get_logs_path(const pid_t& pid){
     return get_logs_path(std::to_string(static_cast<long long>(pid)));
 }
