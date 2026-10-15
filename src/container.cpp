@@ -292,7 +292,6 @@ void Container::run_container(int slave_fd, const fs::path& filesystem_dir) {
         Utils::handle_error("Unable to change directory to " + final_filesystem.string());
     }
 
-    Mount::volumes(final_filesystem.string(), m_spec.volumes);
     Utils::ensure_dirs("old_root");
 
     if (syscall(SYS_pivot_root, ".", "old_root") == ERR) {
@@ -323,6 +322,8 @@ void Container::run_container(int slave_fd, const fs::path& filesystem_dir) {
             std::cerr << "WARNING: GPU driver library injection incomplete: " << gpu_err << '\n';
         }
     }
+
+    Mount::volumes("/old_root", m_spec.volumes);
 
     umount2("/old_root", MNT_DETACH);
     rmdir("/old_root");

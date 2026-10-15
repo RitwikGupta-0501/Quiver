@@ -18,15 +18,11 @@
 CommandLineHandler::CommandLineHandler(StateStore& store, ImageManager& img_manager)
     : m_store(store), m_img_manager(img_manager) {}
 
-void CommandLineHandler::run(const std::vector<std::string>& cmds) {
-    if (cmds.empty()) {
-        Utils::print_usage();
-        return;
-    }
-
-    ContainerSpec spec;
-    spec.id = Utils::generate_container_id();
-
+bool CommandLineHandler::parse_container_options(
+    const std::vector<std::string>& cmds,
+    ContainerSpec& spec,
+    std::string& error
+) {
     size_t i = 0;
     while (i < cmds.size()) {
         const std::string& arg = cmds[i];
@@ -34,29 +30,50 @@ void CommandLineHandler::run(const std::vector<std::string>& cmds) {
         if (arg == "-v" || arg == "--volume") {
             if (i + 1 < cmds.size()) {
                 std::string vol_str = cmds[++i];
-                size_t pos = vol_str.find(':');
-                if (pos != std::string::npos) {
-                    std::string host_str = vol_str.substr(0, pos);
-                    std::string cont_str = vol_str.substr(pos + 1);
+                size_t pos1 = vol_str.find(':');
+                if (pos1 != std::string::npos) {
+                    std::string host_str = vol_str.substr(0, pos1);
+                    std::string cont_str;
+                    bool read_only = false;
+                    size_t pos2 = vol_str.find(':', pos1 + 1);
+                    if (pos2 != std::string::npos) {
+                        cont_str = vol_str.substr(pos1 + 1, pos2 - (pos1 + 1));
+                        std::string mode = vol_str.substr(pos2 + 1);
+                        if (mode == "ro") {
+                            read_only = true;
+                        } else if (mode != "rw") {
+                            error = "Invalid volume mode '" + mode + "': must be 'ro' or 'rw'";
+                            return false;
+                        }
+                    } else {
+                        cont_str = vol_str.substr(pos1 + 1);
+                    }
 
                     if (host_str.empty() || cont_str.empty()) {
-                        Utils::handle_error("Empty paths cannot be mounted");
+                        error = "Empty paths cannot be mounted: " + vol_str;
+                        return false;
                     }
                     if (host_str.front() != '/' || cont_str.front() != '/') {
-                        Utils::handle_error("Paths must be absolute");
+                        error = "Paths must be absolute: " + vol_str;
+                        return false;
                     }
                     if (!Utils::path_exists(host_str)) {
-                        Utils::handle_error("Host path " + host_str + " doesn't exist");
+                        error = "Host path " + host_str + " doesn't exist";
+                        return false;
                     }
 
                     VolumeMount vol{};
                     vol.host_path = host_str;
                     vol.container_path = cont_str;
+                    vol.read_only = read_only;
                     spec.volumes.push_back(vol);
                 } else {
-                    std::cerr << "Error: -v or --volume requires an argument\n";
-                    return;
+                    error = "-v or --volume requires host:container[:ro|rw] format";
+                    return false;
                 }
+            } else {
+                error = "-v or --volume requires an argument";
+                return false;
             }
         } else if (arg == "-p" || arg == "--port") {
             if (i + 1 < cmds.size()) {
@@ -72,20 +89,23 @@ void CommandLineHandler::run(const std::vector<std::string>& cmds) {
                         pm.protocol = "tcp";
                         spec.ports.push_back(pm);
                     } catch (...) {
-                        std::cerr << "Error: Invalid port format " << port_str << "\n";
-                        return;
+                        error = "Invalid port format " + port_str;
+                        return false;
                     }
+                } else {
+                    error = "Invalid port format " + port_str + " (expected host:container)";
+                    return false;
                 }
             } else {
-                std::cerr << "Error: -p or --port requires an argument\n";
-                return;
+                error = "-p or --port requires an argument";
+                return false;
             }
         } else if (arg == "-n" || arg == "--name") {
             if (i + 1 < cmds.size()) {
                 spec.name = cmds[++i];
             } else {
-                std::cerr << "Error: -n or --name requires an argument\n";
-                return;
+                error = "-n or --name requires an argument";
+                return false;
             }
         } else if (arg == "--vfs") {
             spec.use_vfs = true;
@@ -96,36 +116,36 @@ void CommandLineHandler::run(const std::vector<std::string>& cmds) {
                 try {
                     spec.resources.memory_max_bytes = Utils::parse_memory_string(cmds[++i]);
                 } catch (const std::exception& e) {
-                    std::cerr << "Error: Invalid --memory value: " << e.what() << '\n';
-                    return;
+                    error = "Invalid --memory value: " + std::string(e.what());
+                    return false;
                 }
             } else {
-                std::cerr << "Error: " << arg << " requires an argument\n";
-                return;
+                error = arg + " requires an argument";
+                return false;
             }
         } else if (arg == "--cpus") {
             if (i + 1 < cmds.size()) {
                 try {
                     spec.resources.cpus = Utils::parse_cpus_string(cmds[++i]);
                 } catch (const std::exception& e) {
-                    std::cerr << "Error: Invalid --cpus value: " << e.what() << '\n';
-                    return;
+                    error = "Invalid --cpus value: " + std::string(e.what());
+                    return false;
                 }
             } else {
-                std::cerr << "Error: --cpus requires an argument\n";
-                return;
+                error = "--cpus requires an argument";
+                return false;
             }
         } else if (arg == "--pids-limit") {
             if (i + 1 < cmds.size()) {
                 try {
                     spec.resources.pids_max = Utils::parse_pids_limit(cmds[++i]);
                 } catch (const std::exception& e) {
-                    std::cerr << "Error: Invalid --pids-limit value: " << e.what() << '\n';
-                    return;
+                    error = "Invalid --pids-limit value: " + std::string(e.what());
+                    return false;
                 }
             } else {
-                std::cerr << "Error: --pids-limit requires an argument\n";
-                return;
+                error = "--pids-limit requires an argument";
+                return false;
             }
         } else if (arg == "--gpus") {
             if (i + 1 < cmds.size()) {
@@ -134,19 +154,19 @@ void CommandLineHandler::run(const std::vector<std::string>& cmds) {
                     spec.resources.all_gpus = req.all_gpus;
                     spec.resources.gpu_indices = std::move(req.gpu_indices);
                 } catch (const std::exception& e) {
-                    std::cerr << "Error: Invalid --gpus value: " << e.what() << '\n';
-                    return;
+                    error = "Invalid --gpus value: " + std::string(e.what());
+                    return false;
                 }
             } else {
-                std::cerr << "Error: --gpus requires an argument (e.g., all or 0,1)\n";
-                return;
+                error = "--gpus requires an argument (e.g., all or 0,1)";
+                return false;
             }
         } else if (arg == "-i" || arg == "--image") {
             if (i + 1 < cmds.size()) {
                 spec.image = cmds[++i];
             } else {
-                std::cerr << "Error: -i or --image requires an argument\n";
-                return;
+                error = "-i or --image requires an argument";
+                return false;
             }
         } else if (arg == "--") {
             for (size_t j = i + 1; j < cmds.size(); ++j) {
@@ -159,23 +179,20 @@ void CommandLineHandler::run(const std::vector<std::string>& cmds) {
             }
             break;
         } else {
-            std::cerr << "Unknown argument: " << arg << "\n";
-            Utils::print_usage();
-            return;
+            error = "Unknown argument: " + arg;
+            return false;
         }
         i++;
     }
 
     if (spec.image.empty()) {
-        std::cerr << "Error: Image name required (-i)\n";
-        return;
+        error = "Image name required (-i)";
+        return false;
     }
 
     std::string out_path;
-    std::string error;
     if (!m_img_manager.pull(spec.image, out_path, error)) {
-        std::cerr << "Error pulling image: " << error << '\n';
-        return;
+        return false;
     }
 
     std::string img_name, img_tag;
@@ -214,6 +231,25 @@ void CommandLineHandler::run(const std::vector<std::string>& cmds) {
     }
     if (spec.name.empty()) {
         spec.name = "quiver-" + spec.id.substr(0, 12);
+    }
+
+    return true;
+}
+
+void CommandLineHandler::run(const std::vector<std::string>& cmds) {
+    if (cmds.empty()) {
+        Utils::print_usage();
+        return;
+    }
+
+    ContainerSpec spec;
+    spec.id = Utils::generate_container_id();
+
+    std::string error;
+    if (!parse_container_options(cmds, spec, error)) {
+        std::cerr << "Error: " << error << '\n';
+        Utils::print_usage();
+        return;
     }
 
     Container container{ spec, m_store };
@@ -489,14 +525,28 @@ void CommandLineHandler::create(const std::vector<std::string>& cmds) {
         ContainerState cs = *opt;
         for (size_t i = 2; i < cmds.size(); ++i) {
             std::string vol_str = cmds[i];
-            size_t sep_pos = vol_str.find(':');
-            if (sep_pos == std::string::npos) {
+            size_t pos1 = vol_str.find(':');
+            if (pos1 == std::string::npos) {
                 std::cerr << "Invalid volume format: " << vol_str << "\n";
                 continue;
             }
-            VolumeMount vm{};
-            vm.host_path = vol_str.substr(0, sep_pos);
-            vm.container_path = vol_str.substr(sep_pos + 1);
+            std::string host_str = vol_str.substr(0, pos1);
+            std::string cont_str;
+            bool read_only = false;
+            size_t pos2 = vol_str.find(':', pos1 + 1);
+            if (pos2 != std::string::npos) {
+                cont_str = vol_str.substr(pos1 + 1, pos2 - (pos1 + 1));
+                std::string mode = vol_str.substr(pos2 + 1);
+                if (mode == "ro") {
+                    read_only = true;
+                } else if (mode != "rw") {
+                    std::cerr << "Invalid volume mode: " << mode << "\n";
+                    continue;
+                }
+            } else {
+                cont_str = vol_str.substr(pos1 + 1);
+            }
+            VolumeMount vm{host_str, cont_str, read_only};
             cs.volumes.push_back(vm);
         }
         m_store.save_container(cs);
@@ -529,183 +579,11 @@ void CommandLineHandler::create(const std::vector<std::string>& cmds) {
         ContainerSpec spec{};
         spec.id = Utils::generate_container_id();
 
-        size_t i = 0;
-        while (i < cmds.size()) {
-            std::string arg = cmds[i];
-            if (arg == "-n" || arg == "--name") {
-                if (i + 1 < cmds.size()) {
-                    spec.name = cmds[++i];
-                } else {
-                    std::cerr << "Error: -n or --name requires an argument\n";
-                    return;
-                }
-            } else if (arg == "-v" || arg == "--volume") {
-                if (i + 1 < cmds.size()) {
-                    std::string vol_str = cmds[++i];
-                    size_t sep_pos = vol_str.find(':');
-                    if (sep_pos != std::string::npos) {
-                        VolumeMount vm{};
-                        vm.host_path = vol_str.substr(0, sep_pos);
-                        vm.container_path = vol_str.substr(sep_pos + 1);
-                        spec.volumes.push_back(vm);
-                    } else {
-                        std::cerr << "Error: Invalid volume format: " << vol_str << " (expected host:container)\n";
-                        return;
-                    }
-                } else {
-                    std::cerr << "Error: -v or --volume requires an argument\n";
-                    return;
-                }
-            } else if (arg == "-p" || arg == "--port") {
-                if (i + 1 < cmds.size()) {
-                    std::string port_str = cmds[++i];
-                    size_t sep_pos = port_str.find(':');
-                    if (sep_pos != std::string::npos) {
-                        try {
-                            PortMapping pm{};
-                            pm.host_port = std::stoi(port_str.substr(0, sep_pos));
-                            pm.container_port = std::stoi(port_str.substr(sep_pos + 1));
-                            pm.protocol = "tcp";
-                            spec.ports.push_back(pm);
-                        } catch (...) {
-                            std::cerr << "Error: Invalid port numbers: " << port_str << '\n';
-                            return;
-                        }
-                    } else {
-                        std::cerr << "Error: Invalid port format: " << port_str << " (expected host:container)\n";
-                        return;
-                    }
-                } else {
-                    std::cerr << "Error: -p or --port requires an argument\n";
-                    return;
-                }
-            } else if (arg == "--vfs") {
-                spec.use_vfs = true;
-            } else if (arg == "--no-remove") {
-                spec.no_remove = true;
-            } else if (arg == "-m" || arg == "--memory") {
-                if (i + 1 < cmds.size()) {
-                    try {
-                        spec.resources.memory_max_bytes = Utils::parse_memory_string(cmds[++i]);
-                    } catch (const std::exception& e) {
-                        std::cerr << "Error: Invalid --memory value: " << e.what() << '\n';
-                        return;
-                    }
-                } else {
-                    std::cerr << "Error: " << arg << " requires an argument\n";
-                    return;
-                }
-            } else if (arg == "--cpus") {
-                if (i + 1 < cmds.size()) {
-                    try {
-                        spec.resources.cpus = Utils::parse_cpus_string(cmds[++i]);
-                    } catch (const std::exception& e) {
-                        std::cerr << "Error: Invalid --cpus value: " << e.what() << '\n';
-                        return;
-                    }
-                } else {
-                    std::cerr << "Error: --cpus requires an argument\n";
-                    return;
-                }
-            } else if (arg == "--pids-limit") {
-                if (i + 1 < cmds.size()) {
-                    try {
-                        spec.resources.pids_max = Utils::parse_pids_limit(cmds[++i]);
-                    } catch (const std::exception& e) {
-                        std::cerr << "Error: Invalid --pids-limit value: " << e.what() << '\n';
-                        return;
-                    }
-                } else {
-                    std::cerr << "Error: --pids-limit requires an argument\n";
-                    return;
-                }
-            } else if (arg == "--gpus") {
-                if (i + 1 < cmds.size()) {
-                    try {
-                        auto req = Utils::parse_gpus_string(cmds[++i]);
-                        spec.resources.all_gpus = req.all_gpus;
-                        spec.resources.gpu_indices = std::move(req.gpu_indices);
-                    } catch (const std::exception& e) {
-                        std::cerr << "Error: Invalid --gpus value: " << e.what() << '\n';
-                        return;
-                    }
-                } else {
-                    std::cerr << "Error: --gpus requires an argument (e.g., all or 0,1)\n";
-                    return;
-                }
-            } else if (arg == "-i" || arg == "--image") {
-                if (i + 1 < cmds.size()) {
-                    spec.image = cmds[++i];
-                } else {
-                    std::cerr << "Error: -i or --image requires an argument\n";
-                    return;
-                }
-            } else if (arg == "--") {
-                for (size_t j = i + 1; j < cmds.size(); ++j) {
-                    spec.command.push_back(cmds[j]);
-                }
-                break;
-            } else if (!arg.starts_with('-')) {
-                for (size_t j = i; j < cmds.size(); ++j) {
-                    spec.command.push_back(cmds[j]);
-                }
-                break;
-            } else {
-                std::cerr << "Unknown argument: " << arg << "\n";
-                Utils::print_usage();
-                return;
-            }
-            i++;
-        }
-
-        if (spec.image.empty()) {
-            std::cerr << "Error: Image name required (-i)\n";
-            return;
-        }
-
-        std::string out_path;
         std::string error;
-        if (!m_img_manager.pull(spec.image, out_path, error)) {
-            std::cerr << "Error pulling image: " << error << '\n';
+        if (!parse_container_options(cmds, spec, error)) {
+            std::cerr << "Error: " << error << '\n';
+            Utils::print_usage();
             return;
-        }
-
-        std::string img_name, img_tag;
-        size_t colon_pos = spec.image.find(':');
-        if (colon_pos != std::string::npos) {
-            img_name = spec.image.substr(0, colon_pos);
-            img_tag = spec.image.substr(colon_pos + 1);
-        } else {
-            img_name = spec.image;
-            img_tag = "latest";
-        }
-
-        auto img_meta = m_store.get_image(img_name, img_tag);
-        if (img_meta.has_value()) {
-            spec.rootfs_path = img_meta->rootfs_path;
-            spec.env = img_meta->default_env;
-            if (!img_meta->working_dir.empty()) {
-                spec.working_dir = img_meta->working_dir;
-            }
-            if (spec.command.empty()) {
-                if (!img_meta->default_entrypoint.empty() || !img_meta->default_cmd.empty()) {
-                    for (const auto& ep : img_meta->default_entrypoint) {
-                        spec.command.push_back(ep);
-                    }
-                    for (const auto& c : img_meta->default_cmd) {
-                        spec.command.push_back(c);
-                    }
-                }
-            }
-        } else {
-            spec.rootfs_path = out_path;
-        }
-
-        if (spec.hostname.empty()) {
-            spec.hostname = spec.id.substr(0, 6);
-        }
-        if (spec.name.empty()) {
-            spec.name = "quiver-" + spec.id.substr(0, 12);
         }
 
         ContainerState cs{};

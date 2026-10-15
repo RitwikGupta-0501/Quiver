@@ -2,6 +2,7 @@
 #include "../include/utils.hpp"
 #include <format>
 #include <cstring>
+#include <sys/statvfs.h>
 
 void Mount::proc(const std::string& proc_path, const int& flags, const std::string& options){
     if(mount(PROC, proc_path.c_str(), PROC, flags, options.empty() ? nullptr : options.c_str()) == ERR)
@@ -20,7 +21,7 @@ void Mount::sys(const std::string& sys_path, const int& flags, const std::string
 
 void Mount::tmpfs(const std::string& tmpfs_path, const int& flags, const std::string& options){
     if(mount(TMPFS, tmpfs_path.c_str(), TMPFS, flags, options.empty() ? nullptr : options.c_str()) == ERR)
-        Utils::handle_error("Unable to mount " + std::string(PROC));
+        Utils::handle_error("Unable to mount " + std::string(TMPFS));
 }
 
 void Mount::dev_pts(const std::string& dev_pts_path, const int& flags, const std::string& options){
@@ -38,22 +39,27 @@ void Mount::bind_rec_mount(const std::string &src, const std::string &dst, const
         Utils::handle_error("Unable to bind and rec mount " + src + " to " + dst);
 }
 
-void Mount::volumes(const std::string& rootfs, const std::vector<VolumeMount>& volumes, const std::string& options){
-    size_t no_volumes{ volumes.size() };
-    if(no_volumes > 0){
-        std::vector<std::string> paths{};
-        std::vector<std::string> dirs{};
-        for(size_t i{0};i<no_volumes;++i){
-            paths.emplace_back(volumes[i].host_path);
-            dirs.emplace_back(volumes[i].container_path);
+void Mount::volumes(const std::string& host_root_prefix, const std::vector<VolumeMount>& volumes, const std::string& options){
+    for (const auto& vol : volumes) {
+        std::string src = (fs::path(host_root_prefix) / fs::path(vol.host_path).relative_path()).string();
+        std::string dst = vol.container_path;
+        Utils::ensure_dirs(dst);
+        if (::mount(src.c_str(), dst.c_str(), nullptr, MS_BIND | MS_REC, options.empty() ? nullptr : options.c_str()) == -1) {
+            Utils::handle_error("Unable to mount " + src + " to " + dst + ": " + std::strerror(errno));
         }
-        for(size_t i{0};i<dirs.size();++i){
-            dirs[i] = rootfs + dirs[i];
-            Utils::ensure_dirs(dirs[i]);
-        }
-        for(size_t i{0};i<paths.size();++i){
-            if(mount(paths[i].c_str(), dirs[i].c_str(), nullptr, MS_BIND|MS_REC, options.empty() ? nullptr : options.c_str()) == -1){
-                Utils::handle_error("Unable to mount " + paths[i] + " to " + dirs[i]);
+        if (vol.read_only) {
+            struct statvfs vfs{};
+            unsigned long existing_ms_flags = 0;
+            if (::statvfs(dst.c_str(), &vfs) == 0) {
+                if (vfs.f_flag & ST_NOSUID)   existing_ms_flags |= MS_NOSUID;
+                if (vfs.f_flag & ST_NODEV)    existing_ms_flags |= MS_NODEV;
+                if (vfs.f_flag & ST_NOEXEC)   existing_ms_flags |= MS_NOEXEC;
+                if (vfs.f_flag & ST_NOATIME)  existing_ms_flags |= MS_NOATIME;
+                if (vfs.f_flag & ST_RELATIME) existing_ms_flags |= MS_RELATIME;
+            }
+            if (::mount(nullptr, dst.c_str(), nullptr,
+                        MS_BIND | MS_REMOUNT | MS_RDONLY | existing_ms_flags, nullptr) == -1) {
+                Utils::handle_error("Unable to remount read-only volume " + dst + ": " + std::strerror(errno));
             }
         }
     }
