@@ -83,6 +83,10 @@ bool CommandLineHandler::parse_container_options(
                     try {
                         int host = std::stoi(port_str.substr(0, pos));
                         int cont = std::stoi(port_str.substr(pos + 1));
+                        if (host < 1 || host > 65535 || cont < 1 || cont > 65535) {
+                            error = "Port numbers must be between 1 and 65535: " + port_str;
+                            return false;
+                        }
                         PortMapping pm{};
                         pm.host_port = host;
                         pm.container_port = cont;
@@ -454,7 +458,17 @@ void CommandLineHandler::network(const std::vector<std::string>& cmds) {
             return;
         }
         for (size_t i = 1; i < cmds.size(); ++i) {
-            int port = std::stoi(cmds[i]);
+            int port = 0;
+            try {
+                port = std::stoi(cmds[i]);
+            } catch (const std::exception&) {
+                std::cerr << "Error: Invalid port number: " << cmds[i] << '\n';
+                continue;
+            }
+            if (port < 1 || port > 65535) {
+                std::cerr << "Error: Port number must be between 1 and 65535: " << cmds[i] << '\n';
+                continue;
+            }
             for (auto c : m_store.list_containers(false)) {
                 auto prev_size = c.ports.size();
                 std::erase_if(c.ports, [&](const PortMapping& p) {
@@ -485,11 +499,22 @@ void CommandLineHandler::network(const std::vector<std::string>& cmds) {
             std::string net_str = cmds[i];
             size_t sep_pos = net_str.find(':');
             if (sep_pos == std::string::npos) {
-                std::cerr << "Invalid port format: " << net_str << "\n";
+                std::cerr << "Invalid port format: " << net_str << " (expected host:container)\n";
                 continue;
             }
-            int h_port = std::stoi(net_str.substr(0, sep_pos));
-            int c_port = std::stoi(net_str.substr(sep_pos + 1));
+            int h_port = 0;
+            int c_port = 0;
+            try {
+                h_port = std::stoi(net_str.substr(0, sep_pos));
+                c_port = std::stoi(net_str.substr(sep_pos + 1));
+            } catch (const std::exception&) {
+                std::cerr << "Error: Invalid port format: " << net_str << '\n';
+                continue;
+            }
+            if (h_port < 1 || h_port > 65535 || c_port < 1 || c_port > 65535) {
+                std::cerr << "Error: Port numbers must be between 1 and 65535: " << net_str << '\n';
+                continue;
+            }
             PortMapping pm{};
             pm.host_port = h_port;
             pm.container_port = c_port;
