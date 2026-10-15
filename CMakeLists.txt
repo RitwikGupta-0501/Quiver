@@ -144,4 +144,26 @@ target_link_libraries(quiver_state_benchmark PRIVATE
 )
 add_test(NAME StateBenchmarkTests COMMAND quiver_state_benchmark)
 
+# Phase 5.2: 50-100 Container Concurrency & Cleanup Stress Test Suite
+add_executable(quiver_concurrency_tests
+    tests/test_concurrency_stress.cpp
+    src/state_store.cpp
+    src/cgroup.cpp
+    src/gpu_manager.cpp
+    src/mount.cpp
+    src/device_manager.cpp
+    src/utils.cpp
+    src/monitor.cpp
+)
+target_include_directories(quiver_concurrency_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(quiver_concurrency_tests PRIVATE
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+    dl
+)
+add_test(NAME ConcurrencyStressTests COMMAND quiver_concurrency_tests)
+
+
 
