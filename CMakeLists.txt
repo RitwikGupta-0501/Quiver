@@ -127,3 +127,21 @@ target_link_libraries(quiver_gpu_tests PRIVATE
 )
 add_test(NAME GpuTests COMMAND quiver_gpu_tests)
 
+# Phase 5.1: StateStore Lock-Free vs Legacy Monolithic Contention Benchmark
+add_executable(quiver_state_benchmark
+    tests/test_state_benchmark.cpp
+    src/state_store.cpp
+    src/utils.cpp
+    src/monitor.cpp
+)
+target_include_directories(quiver_state_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(quiver_state_benchmark PRIVATE
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+    dl
+)
+add_test(NAME StateBenchmarkTests COMMAND quiver_state_benchmark)
+
+
